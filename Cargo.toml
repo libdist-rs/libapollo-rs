@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "types",
+    "config",
+    "crypto",
+    "util",
+    "net",
+    "consensus",
+    "consensus/apollo",
+    "consensus/artemis",
+    "consensus/synchs",
+    "consensus/optsync",
+    "examples/apollo/node",
+    "examples/apollo/client",
+    "examples/apollo/normal-client",
+    "examples/artemis/node",
+    "examples/artemis/client",
+    "examples/synchs/node",
+    "examples/synchs/node-rr",
+    "examples/synchs/client",
+    "examples/optsync/node",
+    "examples/optsync/client",
+    "tools/genconfig",
+    "stress-test",
+]
