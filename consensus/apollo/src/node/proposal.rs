@@ -32,10 +32,13 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
 }
 
 /// Incoming proposal: block and parent must already be delivered in storage.
+/// `from` is the peer to ask for missing ancestors if we defer this to
+/// `future_msgs` (typically the proposal's leader or the Response's
+/// responder, depending on how it entered the buffer).
 pub async fn try_receive_proposal(
     p: Propose,
     block: Arc<Block>,
-    _from: Replica,
+    from: Replica,
     cx: &mut Context,
 ) {
     if cx.round() > p.round {
@@ -44,7 +47,7 @@ pub async fn try_receive_proposal(
     }
     if cx.round() < p.round {
         log::debug!("Got a proposal from the future; queuing");
-        cx.future_msgs.insert(p.round, (_from, p));
+        cx.future_msgs.insert(p.round, (from, p));
         return;
     }
 
@@ -81,7 +84,7 @@ pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Co
         }
     }
 
-    let msg = Arc::new(ProtocolMsg::Relay((*p).clone()));
+    let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), (*p).clone()));
     let job = cx.c_send(cx.next_leader(), msg).await;
 
     cx.storage.clear(&block.body.tx_hashes);

@@ -67,11 +67,11 @@ pub async fn reactor(
                         "Protocol message channel closed");
                     std::process::exit(0);
                 }
-                let (sender, pmsg) = pmsg_opt.unwrap();
+                let (_, pmsg) = pmsg_opt.unwrap();
                 // So basically, we extract all currently available messages and then replay them in order
-                buffer_message(sender, pmsg, &mut cx);
-                while let Ok(Some((sender, pmsg))) = net_recv.try_next() {
-                    buffer_message(sender, pmsg, &mut cx);
+                buffer_message(pmsg, &mut cx);
+                while let Ok(Some((_, pmsg))) = net_recv.try_next() {
+                    buffer_message(pmsg, &mut cx);
                 }
                 process_message(&mut cx).await;
             },

@@ -74,7 +74,7 @@ pub struct Context {
     /// - Relay
     /// - Blame
     /// - Request
-    pub other_buf: VecDeque<(Replica, ProtocolMsg)>,
+    pub other_buf: VecDeque<ProtocolMsg>,
 
     /// Block waiting (hash1, hash2)
     /// The block with hash2 is waiting for a block with hash1

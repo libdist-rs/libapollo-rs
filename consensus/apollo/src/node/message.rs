@@ -14,10 +14,10 @@ pub async fn process_message(cx:&mut Context)
         delivery_check(sender, p, None, cx).await;
     }
     log::debug!("Handling others: {:?}", cx.other_buf);
-    while let Some((sender, pmsg)) = cx.other_buf.pop_front() {
+    while let Some(pmsg) = cx.other_buf.pop_front() {
         match pmsg {
-            ProtocolMsg::Request(rid, h) => {
-                on_recv_request(sender, rid, h, cx).await;
+            ProtocolMsg::Request(from, rid, h) => {
+                on_recv_request(from, rid, h, cx).await;
             }
             ProtocolMsg::Blame(v) => {
                 on_receive_blame(v, cx).await;
@@ -38,12 +38,15 @@ pub async fn process_message(cx:&mut Context)
     }
 }
 
-pub fn handle_message(sender: Replica, message: ProtocolMsg, cx: &mut Context) {
+pub fn handle_message(message: ProtocolMsg, cx: &mut Context) {
     match message {
-        ProtocolMsg::NewProposal(p, b) => cx.prop_buf.push_back((sender, p, b)),
-        ProtocolMsg::Response(_, p, b) => cx.prop_buf.push_back((sender, p, b)),
-        ProtocolMsg::Relay(p) => cx.relay_buf.push_back((sender, p)),
-        x => cx.other_buf.push_back((sender, x)),
+        ProtocolMsg::NewProposal(p, b) => {
+            let sender = p.sig.origin;
+            cx.prop_buf.push_back((sender, p, b));
+        }
+        ProtocolMsg::Response(from, _rid, p, b) => cx.prop_buf.push_back((from, p, b)),
+        ProtocolMsg::Relay(from, p) => cx.relay_buf.push_back((from, p)),
+        x => cx.other_buf.push_back(x),
     }
 }
 
@@ -74,7 +77,7 @@ pub async fn delivery_check(
                 b_arc
             } else {
                 log::debug!("Block unknown: {:?}", p.block_hash);
-                let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, p.block_hash.clone()));
+                let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, p.block_hash.clone()));
                 cx.prop_waiting.insert(p.block_hash.clone(), p);
                 cx.net_send.send((sender, msg)).await.unwrap();
                 return;
@@ -84,7 +87,7 @@ pub async fn delivery_check(
 
     let parent_hash = block_arc.header.prev.clone();
     if !cx.storage.is_delivered_by_hash(&parent_hash) {
-        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, parent_hash.clone()));
+        let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, parent_hash.clone()));
         cx.storage.add_delivered_block(block_arc);
         cx.prop_waiting_parent.insert(parent_hash, p);
         cx.net_send.send((sender, msg)).await.unwrap();

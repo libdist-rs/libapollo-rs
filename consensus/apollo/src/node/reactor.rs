@@ -56,10 +56,10 @@ pub async fn reactor(
                         "Protocol message channel closed");
                     std::process::exit(0);
                 }
-                let (sender, pmsg) = pmsg_opt.unwrap();
-                handle_message(sender, pmsg, &mut cx);
-                while let Ok(Some((sender, pmsg))) = net_recv.try_next() {
-                    handle_message(sender, pmsg, &mut cx);
+                let (_, pmsg) = pmsg_opt.unwrap();
+                handle_message(pmsg, &mut cx);
+                while let Ok(Some((_, pmsg))) = net_recv.try_next() {
+                    handle_message(pmsg, &mut cx);
                 }
                 process_message(&mut cx).await;
             },

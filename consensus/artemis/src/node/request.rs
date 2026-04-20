@@ -17,13 +17,13 @@ pub async fn handle_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &mu
     } else {
         cx.undelivered_blocks.get(&h).unwrap().clone()
     };
-    let msg = Arc::new(ProtocolMsg::Response(req_id, blk));
+    let msg = Arc::new(ProtocolMsg::Response(cx.myid(), req_id, blk));
     cx.send(sender, msg).await;
 }
 
 /// Request this block
 pub async fn do_request(cx:&mut Context, sender:Replica, h: Hash<Block>) {
     log::debug!("Requesting hash: {:x?}", h);
-    let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, h));
+    let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, h));
     cx.send(sender, msg).await;
 }

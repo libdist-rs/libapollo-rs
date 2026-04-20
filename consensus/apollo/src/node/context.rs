@@ -30,10 +30,13 @@ pub struct Context {
     // Reordering context: proposals that arrived with their block ride in
     // `prop_buf`; relays arrive block-less and fetch from storage (or
     // request) in `relay_buf`. `future_msgs` parks out-of-order proposals
-    // after their block has already landed in storage.
+    // after their block has already landed in storage. The `Replica`
+    // tagged in each entry is the node to ask if a block (or parent) is
+    // missing: for NewProposal that's `p.sig.origin` (the leader); for
+    // Response/Relay that's the embedded `from` (who just forwarded).
     pub prop_buf: VecDeque<(Replica, Propose, Block)>,
     pub relay_buf: VecDeque<(Replica, Propose)>,
-    pub other_buf: VecDeque<(Replica, ProtocolMsg)>,
+    pub other_buf: VecDeque<ProtocolMsg>,
     pub future_msgs: HashMap<Round, (Replica, Propose)>,
 
     /// Storage context

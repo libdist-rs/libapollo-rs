@@ -28,7 +28,7 @@ pub async fn do_round_vote(cx: &mut Context) {
     v.hash = cx.last_seen_block.get_hash();
     v.round = cx.round();
     v.view = cx.view;
-    v.compute_sig(&cx.my_secret_key);
+    v.compute_sig(cx.myid(), &cx.my_secret_key);
     // Multicast the vote
     let msg = Arc::new(ProtocolMsg::UCRVote(v.clone()));
     cx.multicast(msg).await;
@@ -67,7 +67,7 @@ pub async fn try_receive_round_vote(cx:&mut Context, from: Replica, ucr_vote: UC
             cx.vote_ready.insert(ucr_vote.round, ucr_vote);
         } else {
             // I don't have the chain for this. Ask chain from the sender
-            let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash.clone()));
+            let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, ucr_vote.hash.clone()));
             let job = cx.c_send(from, msg).await;
             cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
             job.await.unwrap();
@@ -80,7 +80,7 @@ pub async fn try_receive_round_vote(cx:&mut Context, from: Replica, ucr_vote: UC
     // Do I have the chain?
     if !cx.storage.is_delivered_by_hash(&ucr_vote.hash.clone()) {
         // I don't have the chain for this. Ask chain from the sender
-        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash.clone()));
+        let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, ucr_vote.hash.clone()));
         let job = cx.c_send(from, msg).await;
         cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
         job.await.unwrap();
@@ -121,7 +121,7 @@ pub async fn on_receive_round_vote(cx:&mut Context, ucr_vote: UCRVote) {
     cx.last_voted_block = last_voted_block.clone();
     
     // Relay the vote
-    let msg = Arc::new(ProtocolMsg::Relay(ucr_vote));
+    let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), ucr_vote));
     let job = cx.c_send(cx.next_round_leader(), msg).await;
     
     // Update leaders, and round

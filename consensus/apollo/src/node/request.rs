@@ -17,12 +17,12 @@ pub async fn on_recv_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &m
         Some(b) => b.as_ref().clone(),
     };
     let prop = p_arc.as_ref().clone();
-    let msg = ProtocolMsg::Response(req_id, prop, blk);
+    let msg = ProtocolMsg::Response(cx.myid(), req_id, prop, blk);
     cx.send(sender, Arc::new(msg)).await;
 }
 
 pub async fn do_request(b_hash: Hash<Block>, to: Replica, cx:&mut Context) {
     // I don't have the chain for this. Ask chain from the sender
-    let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, b_hash));
+    let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, b_hash));
     cx.send(to, msg).await;
 }

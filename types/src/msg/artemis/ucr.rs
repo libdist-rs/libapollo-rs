@@ -1,7 +1,7 @@
 use libcrypto::{hash::Hash, Keypair, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use super::{Block, Round, View, Vote};
+use super::{Block, Replica, Round, View, Vote};
 use crate::KeypairSign;
 
 /// UCRVote is sent by the round leader. It commits to:
@@ -26,18 +26,25 @@ struct InternalUCRVote {
 }
 
 impl UCRVote {
-    /// Sign `(hash, round, view)` with the leader's secret key.
-    pub fn compute_sig(&mut self, sk: &Keypair) {
+    /// Sign `(hash, round, view)` with the round leader's secret key and
+    /// record the signer's replica id.
+    pub fn compute_sig(&mut self, origin: Replica, sk: &Keypair) {
         let digest = Hash::<InternalUCRVote>::ser_and_hash(&self.to_internal());
         self.vote.auth = sk
             .sign(digest.as_ref())
             .expect("Failed to sign a ucr message");
+        self.vote.origin = origin;
     }
 
     /// Verify the signature over `(hash, round, view)`.
     pub fn check_sig(&self, pk: &PublicKey) -> bool {
         let digest = Hash::<InternalUCRVote>::ser_and_hash(&self.to_internal());
         pk.verify(digest.as_ref(), &self.vote.auth)
+    }
+
+    /// The signer's replica id.
+    pub fn origin(&self) -> Replica {
+        self.vote.origin
     }
 
     fn to_internal(&self) -> InternalUCRVote {

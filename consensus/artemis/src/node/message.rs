@@ -5,16 +5,16 @@ use types::BlockTrait;
 use super::*;
 
 /// Buffer and re-order messages by queueing messages. This function adds the message to the correct queues. So that when dequeueing we dequeue them correctly.
-pub fn buffer_message(sender: Replica, message: ProtocolMsg, cx: &mut Context) {
+pub fn buffer_message(message: ProtocolMsg, cx: &mut Context) {
     match message {
         ProtocolMsg::Invalid =>
             (),
         ProtocolMsg::NewBlock(b) =>
             cx.block_processing_waiting.push_back(b),
-        ProtocolMsg::Response(_, blk) =>
-            cx.response_waiting.push_back((sender,blk)),
+        ProtocolMsg::Response(from, _req_id, blk) =>
+            cx.response_waiting.push_back((from, blk)),
         x =>
-            cx.other_buf.push_back((sender, x)),
+            cx.other_buf.push_back(x),
     }
 }
 
@@ -23,7 +23,7 @@ pub fn buffer_message(sender: Replica, message: ProtocolMsg, cx: &mut Context) {
 /// - New blocks (`block_processing_waiting`)
 /// - Responses (`response_waiting`)
 /// - Other messages (`other_buf`)
-pub async fn process_message(cx:&mut Context) 
+pub async fn process_message(cx:&mut Context)
 {
     // Process view leader's blocks
     while let Some(b) = cx.block_processing_waiting.pop_front() {
@@ -38,15 +38,17 @@ pub async fn process_message(cx:&mut Context)
         on_receive_round_vote(cx, v).await;
     }
     // Try dealing with protocol messages now
-    while let Some((sender, msg)) = cx.other_buf.pop_front() {
+    while let Some(msg) = cx.other_buf.pop_front() {
         match msg {
-            ProtocolMsg::UCRVote(v) => 
-                try_receive_round_vote(cx, sender, v).await,
-            ProtocolMsg::Relay(v) => 
-                try_receive_round_vote(cx, sender, v).await,
-            ProtocolMsg::Request(req_id,h) => 
-                handle_request(sender, req_id, h, cx).await,
-            ProtocolMsg::Blame(v) => 
+            ProtocolMsg::UCRVote(v) => {
+                let from = v.origin();
+                try_receive_round_vote(cx, from, v).await
+            }
+            ProtocolMsg::Relay(from, v) =>
+                try_receive_round_vote(cx, from, v).await,
+            ProtocolMsg::Request(from, req_id, h) =>
+                handle_request(from, req_id, h, cx).await,
+            ProtocolMsg::Blame(v) =>
                 on_receive_blame(v, cx).await,
             _ => panic!("unreachable"),
         }
