@@ -1,10 +1,10 @@
-use types::Hash;
-use types::artemis::{ProtocolMsg, Replica};
+use libcrypto::hash::Hash;
+use types::artemis::{Block, ProtocolMsg, Replica};
 use super::context::Context;
 use std::sync::Arc;
 
 /// This function is called when some node requests blocks because it doesn't know the chain
-pub async fn handle_request(sender:Replica, req_id: u64, h: Hash, cx: &mut Context)
+pub async fn handle_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &mut Context)
 {
     log::debug!("Got a request from {} for {:x?}", sender, h);
     let is_delivered = cx.storage.is_delivered_by_hash(&h);
@@ -22,7 +22,7 @@ pub async fn handle_request(sender:Replica, req_id: u64, h: Hash, cx: &mut Conte
 }
 
 /// Request this block
-pub async fn do_request(cx:&mut Context, sender:Replica, h: Hash) {
+pub async fn do_request(cx:&mut Context, sender:Replica, h: Hash<Block>) {
     log::debug!("Requesting hash: {:x?}", h);
     let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, h));
     cx.send(sender, msg).await;

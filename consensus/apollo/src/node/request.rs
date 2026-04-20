@@ -1,9 +1,10 @@
-use types::Hash;
+use types::apollo::Block;
+use libcrypto::hash::Hash;
 use types::apollo::{ProtocolMsg, Replica};
 use super::context::Context;
 use std::sync::Arc;
 
-pub async fn on_recv_request(sender:Replica, req_id: u64, h: Hash, cx: &mut Context)
+pub async fn on_recv_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &mut Context)
 {
     log::debug!(
         "Got a request from {} for {:?}", sender, h);
@@ -17,7 +18,7 @@ pub async fn on_recv_request(sender:Replica, req_id: u64, h: Hash, cx: &mut Cont
     cx.send(sender, Arc::new(msg)).await;
 }
 
-pub async fn do_request(b_hash: Hash, to: Replica, cx:&mut Context) {
+pub async fn do_request(b_hash: Hash<Block>, to: Replica, cx:&mut Context) {
     // I don't have the chain for this. Ask chain from the sender
     let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, b_hash));
     cx.send(to, msg).await;

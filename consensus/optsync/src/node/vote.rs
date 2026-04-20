@@ -1,10 +1,10 @@
 use log::debug;
-use types::optsync::{CertType, Certificate, Propose};
-use types::Hash;
+use types::optsync::{Block, CertType, Certificate, Propose};
+use libcrypto::hash::Hash;
 use crate::node::context::Context;
 use std::sync::Arc;
 
-pub fn add_vote(mut c: Certificate, hash: Hash, cx: &mut Context) -> bool {
+pub fn add_vote(mut c: Certificate, hash: Hash<Block>, cx: &mut Context) -> bool {
     let mut commit_decision = false;
     debug!("Waiting for {} votes",(3*cx.num_nodes)/4 as usize);
 

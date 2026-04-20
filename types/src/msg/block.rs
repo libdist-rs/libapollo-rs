@@ -1,67 +1,72 @@
-use serde::{Serialize, Deserialize};
-use super::{Transaction, Certificate};
-use crate::{BlockTrait, WireReady, protocol::{Replica, Height}};
-use crate::{EMPTY_HASH, Hash};
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use super::{Certificate, Transaction};
+use crate::{protocol::{Height, Replica}, BlockTrait, WireReady};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
     pub header: Header,
     pub body: Body,
 
-    // Cache
-    #[serde(skip)]
-    pub hash: Hash,
+    /// Cache -- populated by `init()` after deserialization, not wire-transmitted.
+    /// Explicit `default` because the auto-derived `Default` on libcrypto's
+    /// `Hash<T>` bounds on `T: Default`, which Block cannot satisfy (cyclic).
+    #[serde(skip, default = "empty_block_hash")]
+    pub hash: Hash<Block>,
+}
+
+fn empty_block_hash() -> Hash<Block> {
+    Hash::<Block>::EMPTY_HASH
 }
 
 impl Block {
     pub fn with_tx(txs: Vec<Arc<Transaction>>) -> Self {
-        Block{
+        Block {
             header: Header::new(),
             body: Body::new(txs),
-            hash: EMPTY_HASH,
+            hash: Hash::<Block>::EMPTY_HASH,
         }
     }
 
-    pub fn compute_hash(&self) -> Hash {
-        crate::ser_and_hash(self)
+    pub fn compute_hash(&self) -> Hash<Self> {
+        Hash::<Self>::ser_and_hash(self)
     }
 }
 
-pub const GENESIS_BLOCK: Block = Block{
-    header: Header{
-        prev:EMPTY_HASH,
+pub const GENESIS_BLOCK: Block = Block {
+    header: Header {
+        prev: Hash::<Block>::EMPTY_HASH,
         extra: Vec::new(),
         author: 0,
         height: 0,
         blame_certificates: Vec::new(),
     },
-    body: Body{
+    body: Body {
         tx_hashes: Vec::new(),
     },
-    hash: EMPTY_HASH,
+    hash: Hash::<Block>::EMPTY_HASH,
 };
 
 impl WireReady for Block {
     fn from_bytes(data: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(data)
-            .expect("failed to decode the block");
+        let c: Self = bincode::deserialize(data).expect("failed to decode the block");
         c.init()
     }
-    
+
     fn init(mut self) -> Self {
         self.hash = self.compute_hash();
         self
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize Block");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize Block")
     }
 }
 
 impl BlockTrait for Block {
-    fn get_hash(&self) -> Hash {
+    fn get_hash(&self) -> Hash<Self> {
         self.hash.clone()
     }
 
@@ -76,24 +81,22 @@ impl BlockTrait for Block {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Body {
-    pub tx_hashes: Vec<Hash>,
+    pub tx_hashes: Vec<Hash<Transaction>>,
 }
 
 impl Body {
     pub fn new(txs: Vec<Arc<Transaction>>) -> Self {
-        let mut hashes = Vec::new();
-        for tx in txs {
-            hashes.push(crate::ser_and_hash(tx.as_ref()));
-        }
-        Self{
-            tx_hashes: hashes,
-        }
+        let hashes = txs
+            .iter()
+            .map(|tx| Hash::<Transaction>::ser_and_hash(tx.as_ref()))
+            .collect();
+        Self { tx_hashes: hashes }
     }
 }
 
-#[derive(Serialize, Deserialize,Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Header {
-    pub prev: Hash,
+    pub prev: Hash<Block>,
     pub extra: Vec<u8>,
     pub author: Replica,
     pub height: Height,
@@ -112,11 +115,11 @@ impl std::fmt::Debug for Header {
 
 impl std::fmt::Debug for Body {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.tx_hashes.len() > 0 {
+        if !self.tx_hashes.is_empty() {
             f.debug_struct("Block Body")
                 .field("Length", &self.tx_hashes.len())
                 .field("First", &self.tx_hashes[0])
-                .field("Last", &self.tx_hashes[self.tx_hashes.len()-1])
+                .field("Last", &self.tx_hashes[self.tx_hashes.len() - 1])
                 .finish()
         } else {
             f.debug_struct("Block Body")
@@ -128,8 +131,8 @@ impl std::fmt::Debug for Body {
 
 impl Header {
     pub fn new() -> Self {
-        Header{
-            prev:EMPTY_HASH,
+        Header {
+            prev: Hash::<Block>::EMPTY_HASH,
             extra: Vec::new(),
             author: 0,
             height: 0,
@@ -137,4 +140,3 @@ impl Header {
         }
     }
 }
-

@@ -1,5 +1,5 @@
-use types::synchs::{CertType, Certificate, Propose};
-use types::Hash;
+use types::synchs::{Block, CertType, Certificate, Propose};
+use libcrypto::hash::Hash;
 use super::{
     context::Context, 
     proposal::{
@@ -8,7 +8,7 @@ use super::{
 };
 use std::sync::Arc;
 
-pub fn add_vote(mut c: Certificate, hash: Hash, cx: &mut Context) {
+pub fn add_vote(mut c: Certificate, hash: Hash<Block>, cx: &mut Context) {
     if cx.cert_map.contains_key(&hash) {
         log::debug!("Extra vote received. discarding");
         return;

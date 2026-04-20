@@ -1,13 +1,16 @@
-use crate::{BlockTrait, WireReady};
-use crate::{Hash, KeypairSign};
-use libcrypto::{Keypair, PublicKey};
-use super::super::Block as OldBlock;
-use super::{Vote, Replica, Height, Transaction};
-use crate::GENESIS_BLOCK as OldGenesis;
-use serde::{Serialize, Deserialize};
+use libcrypto::{hash::Hash, Keypair, PublicKey};
+use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::sync::Arc;
 
-/// This block definition overrides the original block and adds a signature from the view leader
+use super::super::Block as OldBlock;
+use super::{Replica, Height, Transaction, Vote};
+use crate::GENESIS_BLOCK as OldGenesis;
+use crate::{BlockTrait, KeypairSign, WireReady};
+
+/// Artemis wraps the shared block with a leader signature. The block's
+/// *identity* hash is still the hash of the underlying content (`self.blk`);
+/// the signature authenticates the content but isn't part of the identity.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Block {
     pub blk: OldBlock,
@@ -16,39 +19,45 @@ pub struct Block {
 
 pub const GENESIS_BLOCK: Block = Block {
     blk: OldGenesis,
-    sig: Vote{
+    sig: Vote {
         auth: vec![],
         origin: 0,
-    }
+    },
 };
 
 impl Block {
     pub fn with_tx(txs: Vec<Arc<Transaction>>) -> Self {
         Block {
             blk: OldBlock::with_tx(txs),
-            sig: Vote{
+            sig: Vote {
                 auth: vec![],
-                origin:0,
-            }
+                origin: 0,
+            },
         }
     }
 
-    /// Checks if the block is signed correctly by the holder of pk
+    /// Check the leader's signature over the block's content hash.
     pub fn check_sig(&self, pk: &PublicKey) -> bool {
         pk.verify(self.blk.hash.as_ref(), &self.sig.auth)
     }
 
-    /// Adds a signature to the block. Make sure that the block is initialized (i.e., the hash is set properly)
+    /// Sign the block. Caller must have already called `WireReady::init()` so
+    /// that `self.blk.hash` is populated.
     pub fn sign(&mut self, sk: &Keypair) {
-        let auth = sk.sign(self.blk.hash.as_ref())
+        let auth = sk
+            .sign(self.blk.hash.as_ref())
             .expect("Failed to sign the block");
         self.sig.auth = auth;
     }
 }
 
 impl BlockTrait for Block {
-    fn get_hash(&self) -> Hash {
-        self.blk.get_hash()
+    fn get_hash(&self) -> Hash<Self> {
+        // The content hash is Hash<OldBlock>; re-tag its bytes as Hash<Self>
+        // so Storage / HashMaps keyed by `Hash<artemis::Block>` remain
+        // type-consistent without a new digest.
+        Hash::<Self>::try_from(self.blk.hash.as_ref())
+            .expect("hash is exactly 32 bytes")
     }
 
     fn get_height(&self) -> Height {
@@ -70,13 +79,11 @@ impl WireReady for Block {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize Block");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize Block")
     }
 
     fn from_bytes(data: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(data)
-            .expect("failed to decode the block");
+        let c: Self = bincode::deserialize(data).expect("failed to decode the block");
         c.init()
     }
 }

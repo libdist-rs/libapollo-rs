@@ -1,52 +1,40 @@
-use crate::Hash;
-use serde::{
-    Serialize, 
-    Deserialize
-};
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use super::{CertType, Certificate, Payload, View, Block, Propose};
+
+use super::{Block, CertType, Certificate, Payload, Propose, View};
 use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMsg {
-    /// New Proposal
     RawNewProposal(Propose, Block),
     NewProposal(Propose),
-    /// A Vote for the proposed block
+    /// A vote for a proposed block.
     VoteMsg(Certificate, Propose),
-    /// An equivocation blame
-    /// Equivocation Blame is sent when two equivocating proposals are heard
-    /// It contains
-    /// 1) The leader who equivocated
-    /// 2) The two equivocating blocks
+    /// Two equivocating proposals from the same leader.
     EquivcationBlameMsg(Block, Block, Certificate),
     NoProgressBlameMsg(Certificate),
-    
-    /// A message to change the view
-    /// View is the old view
-    /// Certificate is the certificate for the old view
+
+    /// Change view: (old view, certificate for the old view).
     ChangeView(View, Certificate),
-    /// Certificate saying that all the nodes are waiting to quit the view
-    QuitViewMsg(View, Certificate), 
-    /// Status: Contains the block and its certificate
+    /// f+1 waiters quitting the view.
+    QuitViewMsg(View, Certificate),
+    /// Status: block + its certificate.
     StatusMsg(Certificate),
-    /// Invalid message
     INVALID,
 }
 
-impl ProtocolMsg {
-}
+impl ProtocolMsg {}
 
 impl WireReady for ProtocolMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(bytes)
-            .expect("failed to decode the protocol message");
+        let c: Self =
+            bincode::deserialize(bytes).expect("failed to decode the protocol message");
         c.init()
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize protocol message");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize protocol message")
     }
 
     fn init(self) -> Self {
@@ -55,33 +43,33 @@ impl WireReady for ProtocolMsg {
                 let b = b.init();
                 p.block = Some(Arc::new(b));
                 ProtocolMsg::NewProposal(p)
-            },
+            }
             ProtocolMsg::VoteMsg(ref c, _) => {
-                if let CertType::Vote(_,_) = &c.msg {
+                if matches!(&c.msg, CertType::Vote(_, _)) {
                     self
                 } else {
                     log::debug!("Invalid {:?}", self);
                     ProtocolMsg::INVALID
                 }
-            },
-            ProtocolMsg::EquivcationBlameMsg(_,_,ref c) => {
-                if let CertType::Blame(_,_) = &c.msg {
-                    return self;
+            }
+            ProtocolMsg::EquivcationBlameMsg(_, _, ref c) => {
+                if matches!(&c.msg, CertType::Blame(_, _)) {
+                    self
                 } else {
                     log::debug!("Invalid {:?}", self);
                     ProtocolMsg::INVALID
                 }
-            },
+            }
             ProtocolMsg::NoProgressBlameMsg(ref c) => {
-                if let CertType::Blame(_,_) = &c.msg {
-                    return self;
+                if matches!(&c.msg, CertType::Blame(_, _)) {
+                    self
                 } else {
                     log::debug!("Invalid {:?}", self);
                     ProtocolMsg::INVALID
                 }
-            },
+            }
             ProtocolMsg::ChangeView(ref v, ref c) => {
-                if let CertType::Vote(ref x,_) = c.msg {
+                if let CertType::Vote(ref x, _) = c.msg {
                     if *v == *x {
                         self
                     } else {
@@ -93,36 +81,31 @@ impl WireReady for ProtocolMsg {
                     ProtocolMsg::INVALID
                 }
             }
-            _x => _x,
+            other => other,
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
-    /// RawNewBlock contains Proposal, Block, and Payload
-    /// Received directly from the network
-    /// After init this will be transformed into a NewBlock
+    /// Leader push of a new block; re-packaged into `NewBlock` during `init`.
     RawNewBlock(Block, Payload),
-    /// A processed message
     NewBlock(Block, Payload),
-    /// Request an object with Hash
-    Request(Hash),
-    /// Respond with an object with Hash
-    RawResponse(Hash, Block),
-    Response(Hash, Block),
+    /// Client asks a node to resend the block with the given hash.
+    Request(Hash<Block>),
+    RawResponse(Hash<Block>, Block),
+    Response(Hash<Block>, Block),
 }
 
 impl WireReady for ClientMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(bytes)
-            .expect("failed to decode the protocol message");
+        let c: Self =
+            bincode::deserialize(bytes).expect("failed to decode the client message");
         c.init()
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize client message");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize client message")
     }
 
     fn init(self) -> Self {
@@ -130,12 +113,12 @@ impl WireReady for ClientMsg {
             ClientMsg::RawNewBlock(mut block, payload) => {
                 block.hash = block.compute_hash();
                 ClientMsg::NewBlock(block, payload)
-            },
+            }
             ClientMsg::RawResponse(h, mut block) => {
                 block.hash = block.compute_hash();
                 ClientMsg::Response(h, block)
             }
-            _x => _x,
+            other => other,
         }
     }
 }

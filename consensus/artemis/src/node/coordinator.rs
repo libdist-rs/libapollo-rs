@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+use libcrypto::hash::Hash;
 use types::KeypairSign;
 use types::{BlockTrait, artemis::{Block, ProtocolMsg, Transaction}};
 use types::WireReady;
@@ -9,7 +11,13 @@ pub async fn do_new_block(txs: Vec<Arc<Transaction>>, cx:&mut Context)
 {
     log::debug!("View leader dispatching a block");
     let mut new_block = Block::with_tx(txs);
-    new_block.blk.header.prev = cx.last_seen_block.get_hash();
+    // last_seen_block.get_hash() is Hash<artemis::Block>; the inner header's
+    // `prev` is typed as Hash<types::Block>. The bytes are identical -- the
+    // phantom type is the only difference, so re-tag via `try_from`.
+    let parent_hash = cx.last_seen_block.get_hash();
+    new_block.blk.header.prev =
+        libcrypto::hash::Hash::try_from(parent_hash.as_ref())
+            .expect("hash is exactly 32 bytes");
     new_block.blk.header.author = cx.myid();
     new_block.blk.header.height = cx.last_seen_block.get_height()+1;
     new_block.sig.origin = cx.myid();
@@ -33,8 +41,12 @@ pub async fn on_receive_new_block_direct(cx:&mut Context, blk: Block) {
         return;
     }
     
-    // Check if the block is delivered
-    if !cx.storage.is_delivered_by_hash(&blk.blk.header.prev.clone()) {
+    // Check if the parent is delivered. `blk.blk.header.prev` is
+    // `Hash<types::Block>`; Storage is keyed by `Hash<artemis::Block>`, so
+    // re-tag via `try_from`.
+    let prev_hash: Hash<Block> =
+        Hash::try_from(blk.blk.header.prev.as_ref()).expect("hash is exactly 32 bytes");
+    if !cx.storage.is_delivered_by_hash(&prev_hash) {
         log::warn!("View leader sent out of order blocks");
         return;
     }

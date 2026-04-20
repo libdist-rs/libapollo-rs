@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+use libcrypto::hash::Hash;
 use types::artemis::{Block, ProtocolMsg, Replica};
 use types::BlockTrait;
 use super::*;
@@ -63,7 +65,11 @@ pub async fn update_delivery(cx:&mut Context, b: Block, sender: Replica) {
     if cx.storage.is_delivered_by_hash(&b.get_hash()) {
         return;
     }
-    let p_hash = b.blk.header.prev.clone();
+    // The parent pointer lives on the inner `types::Block` and is typed as
+    // `Hash<types::Block>`; re-tag into `Hash<artemis::Block>` so it lines up
+    // with the Storage / block_parent_waiting keys.
+    let p_hash = Hash::<Block>::try_from(b.blk.header.prev.as_ref())
+        .expect("hash is exactly 32 bytes");
     let is_parent_delivered = cx.storage.is_delivered_by_hash(
         &p_hash);
     if cx.block_parent_waiting.contains_key(&p_hash) {

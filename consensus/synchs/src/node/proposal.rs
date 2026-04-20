@@ -1,7 +1,7 @@
 use types::KeypairSign;
 use std::collections::HashSet;
 use super::context::Context;
-use types::EMPTY_HASH;
+use libcrypto::hash::Hash;
 use types::synchs::{Block, CertType, Certificate, Transaction, Vote, 
         Propose, ProtocolMsg};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub fn check_proposal(p: Arc<Propose>, cx:&Context) -> bool {
 
     // Check if the first block extends the genesis block
     if new_block.header.height == 1 &&
-        new_block.header.prev != EMPTY_HASH 
+        new_block.header.prev != libcrypto::hash::Hash::<Block>::EMPTY_HASH 
     {
         log::warn!(
             "First block does not extend the genesis block");

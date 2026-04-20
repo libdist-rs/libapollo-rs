@@ -1,63 +1,59 @@
-use crate::{ser_and_hash, EMPTY_HASH, Hash, KeypairSign};
-use libcrypto::{Keypair, PublicKey};
-use serde::{Serialize, Deserialize};
+use libcrypto::{hash::Hash, Keypair, PublicKey};
+use serde::{Deserialize, Serialize};
 
-use super::{Round, View, Vote};
+use super::{Block, Round, View, Vote};
+use crate::KeypairSign;
 
+/// UCRVote is sent by the round leader. It commits to:
+/// - a block (by hash),
+/// - a view number,
+/// - a UCR round number,
+/// with a signature over the three.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-/// UCRVote message is sent by the round leader
-/// It contains
-/// - Hash: The hash of the block
-/// - View: The view number for voting
-/// - Round: The UCR round for this vote
-/// - Vote: A vote on this message 
 pub struct UCRVote {
-    pub hash: Hash,
+    pub hash: Hash<Block>,
     pub round: Round,
     pub view: View,
-    // Private so you are forced to use `compute_sig`
+    /// Private so callers are forced through `compute_sig`/`check_sig`.
     vote: Vote,
 }
 
 #[derive(Serialize, Deserialize)]
 struct InternalUCRVote {
-    hash: Hash,
-    round: Round, 
+    hash: Hash<Block>,
+    round: Round,
     view: View,
 }
 
 impl UCRVote {
-
-    /// Compute and update the signature on this vote
-    /// Ensure that the `hash`, `view` and `round` are set
-    /// If you change any of the above, don't forget to update the signature
-    pub fn compute_sig(&mut self, sk:&Keypair) {
-        let ser = ser_and_hash(&self.to_internal());
-        self.vote.auth = sk.sign(ser.as_ref())
+    /// Sign `(hash, round, view)` with the leader's secret key.
+    pub fn compute_sig(&mut self, sk: &Keypair) {
+        let digest = Hash::<InternalUCRVote>::ser_and_hash(&self.to_internal());
+        self.vote.auth = sk
+            .sign(digest.as_ref())
             .expect("Failed to sign a ucr message");
     }
 
-    /// Check the signature on this message
+    /// Verify the signature over `(hash, round, view)`.
     pub fn check_sig(&self, pk: &PublicKey) -> bool {
-        let ser = ser_and_hash(&self.to_internal());
-        pk.verify(ser.as_ref(), &self.vote.auth)
+        let digest = Hash::<InternalUCRVote>::ser_and_hash(&self.to_internal());
+        pk.verify(digest.as_ref(), &self.vote.auth)
     }
 
     fn to_internal(&self) -> InternalUCRVote {
-        InternalUCRVote{
+        InternalUCRVote {
             hash: self.hash.clone(),
             round: self.round,
             view: self.view,
         }
     }
 
-    /// Get an empty vote instance with defaults
     pub fn new() -> Self {
         Self {
-            hash: EMPTY_HASH,
+            hash: Hash::<Block>::EMPTY_HASH,
             round: 0,
             view: 0,
-            vote: Vote{
+            vote: Vote {
                 auth: Vec::new(),
                 origin: 0,
             },

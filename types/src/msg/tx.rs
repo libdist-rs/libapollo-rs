@@ -1,24 +1,24 @@
-use crate::Hash;
-use serde::{Serialize, Deserialize};
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
 
 use crate::{TxTrait, WireReady};
 
-#[derive(Serialize, Deserialize, Debug,Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction {
     pub data: Vec<u8>,
     pub request: Vec<u8>,
 }
 
 impl Transaction {
-    pub fn compute_hash(&self) -> Hash {
-        crate::ser_and_hash(self)
+    pub fn compute_hash(&self) -> Hash<Self> {
+        Hash::<Self>::ser_and_hash(self)
     }
 
-    pub fn new_dummy_tx(i:u64, payload:usize) -> Self {
+    pub fn new_dummy_tx(i: u64, payload: usize) -> Self {
         log::trace!("Creating a dummy transaction with payload {}", payload);
-        let t = Transaction{
+        let t = Transaction {
             data: i.to_be_bytes().to_vec(),
-            request: vec![1;payload],
+            request: vec![1; payload],
         };
         log::trace!("Created dummy transaction {:?}", t);
         t
@@ -27,8 +27,8 @@ impl Transaction {
 
 impl WireReady for Transaction {
     fn from_bytes(data: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(data)
-            .expect("failed to decode the block");
+        let c: Self =
+            bincode::deserialize(data).expect("failed to decode the transaction");
         c.init()
     }
 
@@ -37,13 +37,12 @@ impl WireReady for Transaction {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize transaction");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize transaction")
     }
 }
 
 impl TxTrait for Transaction {
-    fn get_hash(&self) -> Hash {
+    fn get_hash(&self) -> Hash<Self> {
         self.compute_hash()
     }
 }

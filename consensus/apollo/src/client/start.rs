@@ -87,7 +87,7 @@ pub async fn start(
             tx_opt = recv.recv(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
                     let tx = x.as_ref();
-                    let hash = types::ser_and_hash(tx);
+                    let hash = libcrypto::hash::Hash::<Transaction>::ser_and_hash(tx);
                     net_send.send((send_id,x)).await
                         .expect("Failed to send to the client");
                     cx.time_map.insert(hash, SystemTime::now());

@@ -1,32 +1,33 @@
-use serde::{Serialize, Deserialize};
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
 use super::{Block, Propose, Vote};
 use crate::WireReady;
-use crate::Hash;
-use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[repr(u8)]
 pub enum ProtocolMsg {
-    /// Raw Proposal
+    /// Leader's raw proposal -- re-packaged into `NewProposal` during `init`.
     RawNewProposal(Propose, Block),
     NewProposal(Propose),
 
-    /// Relay
+    /// A non-leader forwarding a received proposal to the next leader.
     Relay(Propose),
 
-    Request(u64, Hash),
-    /// RawResponse
+    /// A request to re-send the block with the given hash (+ request id for dedup).
+    Request(u64, Hash<Block>),
     RawResponse(u64, Propose, Block),
     Response(u64, Propose),
 
-    // Blame a node
+    /// Blame a misbehaving leader.
     Blame(Vote),
 }
 
 impl WireReady for ProtocolMsg {
-    fn from_bytes(bytes:&[u8]) -> Self {
-        let c:Self = bincode::deserialize(bytes)
-            .expect("failed to decode the protocol message");
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let c: Self =
+            bincode::deserialize(bytes).expect("failed to decode the protocol message");
         c.init()
     }
 
@@ -36,18 +37,17 @@ impl WireReady for ProtocolMsg {
                 block.hash = block.compute_hash();
                 prop.block = Some(Arc::new(block));
                 ProtocolMsg::NewProposal(prop)
-            },
-            ProtocolMsg::RawResponse(_i, mut prop, mut block) => {
+            }
+            ProtocolMsg::RawResponse(i, mut prop, mut block) => {
                 block.hash = block.compute_hash();
                 prop.block = Some(Arc::new(block));
-                ProtocolMsg::Response(_i, prop)
-            },
-            _x => _x,
+                ProtocolMsg::Response(i, prop)
+            }
+            other => other,
         }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize protocol message");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize protocol message")
     }
 }

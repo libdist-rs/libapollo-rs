@@ -1,12 +1,14 @@
-use serde::{Serialize, Deserialize};
-use crate::{Replica, Vote, View};
-use crate::Hash;
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
+
+use super::Block;
+use crate::{Replica, View, Vote};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum CertType {
     Blame(Replica, View),
-    Vote(View, Hash),
-    QuitView(View, Hash),
+    Vote(View, Hash<Block>),
+    QuitView(View, Hash<Block>),
     DEFAULT,
 }
 
@@ -20,7 +22,7 @@ impl Certificate {
     pub fn empty_cert() -> Self {
         Certificate {
             votes: Vec::new(),
-            msg:CertType::DEFAULT,
+            msg: CertType::DEFAULT,
         }
     }
 }

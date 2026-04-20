@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use fnv::FnvHashMap as HashMap;
-use types::Hash;
+use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
 use types::KeypairSign;
 use futures::channel::mpsc::UnboundedSender;
@@ -38,7 +38,7 @@ pub struct Context {
     pub storage: Storage,
     /// The chain of proposals: Map of block hash to its proposal
     pub prop_chain_by_round: HashMap<Round, Arc<Propose>>,
-    pub prop_chain_by_hash: HashMap<Hash, Arc<Propose>>,
+    pub prop_chain_by_hash: HashMap<Hash<Block>, Arc<Propose>>,
 
     /// Round state
     round: Round,
@@ -47,9 +47,9 @@ pub struct Context {
     // Protocol state
     pub last_seen_block: Arc<Block>,
     /// The blocks we are waiting for, to handle propose messages
-    pub prop_waiting: HashMap<Hash, Propose>,
+    pub prop_waiting: HashMap<Hash<Block>, Propose>,
     /// The blocks we are waiting for to handle the propose message
-    pub prop_waiting_parent: HashMap<Hash, Propose>,
+    pub prop_waiting_parent: HashMap<Hash<Block>, Propose>,
     pub req_ctr:u64,
 }
 

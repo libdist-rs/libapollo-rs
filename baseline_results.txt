@@ -12,27 +12,22 @@ OS           : macOS 26.4.1 (Darwin 25.4.0)
 Toolchain    : rustc 1.91.1
 
 Current dependency state:
-  - libcrypto-rs v0.3.2    (replaces the old in-tree `crypto/` crate)
-  - TODO: libnet-rs         (still using the vendored `net/` crate)
-  - TODO: libmempool-rs     (still using the in-tree tx pool inside types::Storage)
-  - TODO: libstorage-rs     (still using the in-memory block store inside types::Storage)
-
-These numbers are the reference for subsequent migration commits. Re-run
-`./target/release/stress-test` after each migration and compare. Any
-regression > ~15% on throughput or > 2x on latency wants investigation
-(localhost runs have ~20% run-to-run variance, so sub-15% deltas are noise).
+  - libcrypto-rs v0.3.2   (hash + keys; typed `Hash<Block>`, `Hash<Transaction>`)
+  - TODO: libnet-rs        (still using the vendored `net/` crate)
+  - TODO: libmempool-rs    (still using the in-tree tx pool inside types::Storage)
+  - TODO: libstorage-rs    (still using the in-memory block store inside types::Storage)
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────
 │ Protocol            N    f   blk     txs       Throughput          Latency
 ├──────────────────────────────────────────────────────────────────────────────────────────
-│ Apollo              3    1   400   50000   97452.11 tx/s      118.25 ms
-│ Apollo              7    3   400   50000   57534.31 tx/s      234.29 ms
-│ Artemis             3    1   400   50000  102238.50 tx/s       89.29 ms
-│ Artemis             7    3   400   50000   52506.34 tx/s      188.75 ms
-│ Sync HotStuff       3    1   400   50000   72022.53 tx/s      126.85 ms
-│ Sync HotStuff       7    3   400   50000   39287.22 tx/s      230.38 ms
-│ Opt Sync            3    1   400   50000  105206.47 tx/s       85.89 ms
-│ Opt Sync            7    3   400   50000   43161.07 tx/s      206.75 ms
+│ Apollo              3    1   400   50000  120198.67 tx/s       83.78 ms
+│ Apollo              7    3   400   50000   54086.41 tx/s      205.13 ms
+│ Artemis             3    1   400   50000  101324.46 tx/s       90.75 ms
+│ Artemis             7    3   400   50000   45716.00 tx/s      213.43 ms
+│ Sync HotStuff       3    1   400   50000   69605.28 tx/s      132.42 ms
+│ Sync HotStuff       7    3   400   50000   37155.59 tx/s      253.50 ms
+│ Opt Sync            3    1   400   50000  107514.50 tx/s       82.78 ms
+│ Opt Sync            7    3   400   50000   31547.22 tx/s      308.80 ms
 └──────────────────────────────────────────────────────────────────────────────────────────
 
 Note on latency

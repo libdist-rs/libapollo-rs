@@ -5,7 +5,7 @@ use config::Node;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
 use types::KeypairSign;
 use fnv::FnvHashMap as HashMap;
-use types::Hash;
+use libcrypto::hash::Hash;
 use std::{sync::Arc, time::Duration};
 
 pub struct Context {
@@ -26,14 +26,14 @@ pub struct Context {
 
     /// State context
     pub storage: Storage,
-    pub resp_cert: HashMap<Hash, Arc<Certificate>>, // Contains responsive certificates
-    pub cert_map: HashMap<Hash, Certificate>, // Contains all certified blocks
+    pub resp_cert: HashMap<Hash<Block>, Arc<Certificate>>, // Contains responsive certificates
+    pub cert_map: HashMap<Hash<Block>, Certificate>, // Contains all certified blocks
     pub height: Height,
     pub last_leader: Replica,
     pub last_seen_block: Arc<Block>,
     pub last_seen_cert: Certificate,
     pub last_committed_block_ht: Height,
-    pub vote_map: HashMap<Hash, Certificate>,
+    pub vote_map: HashMap<Hash<Block>, Certificate>,
     pub view: View,
     pub commit_queue:DelayQueue<Arc<Propose>>,
 }

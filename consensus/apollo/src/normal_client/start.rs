@@ -7,7 +7,7 @@ use fnv::FnvHashSet as HashSet;
 use config::Client;
 use types::apollo::{Block, ClientMsg, Transaction};
 use futures::channel::mpsc::channel;
-use types::Hash;
+use libcrypto::hash::Hash;
 use consensus::statistics;
 use std::sync::Arc;
 use util::codec::EnCodec;
@@ -17,10 +17,10 @@ use futures::{SinkExt, StreamExt};
 
 struct Context {
     pending: usize,
-    time_map: HashMap<Hash, SystemTime>,
-    count_map:HashMap<Hash, usize>,
-    finished_map:HashSet<Hash>,
-    latency_map: HashMap<Hash, (SystemTime, SystemTime)>,
+    time_map: HashMap<Hash<Transaction>, SystemTime>,
+    count_map: HashMap<Hash<Block>, usize>,
+    finished_map: HashSet<Hash<Block>>,
+    latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
     num_cmds: u128,
 }
 
@@ -78,8 +78,8 @@ pub async fn start(
     let mut cx = Context::new();
     cx.pending = window;
     // let mut time_map = HashMap::new();
-    // let mut count_map:HashMap<Hash, usize> = HashMap::new();
-    // let mut finished_map:HashSet<Hash> = HashSet::new();
+    // let mut count_map:HashMap<Hash<Block>, usize> = HashMap::new();
+    // let mut finished_map:HashSet<Hash<Block>> = HashSet::new();
     // let mut latency_map = HashMap::new();
     // let mut num_cmds:u128 = 0;
 
@@ -89,7 +89,7 @@ pub async fn start(
         tokio::select! {
             tx_opt = recv.next(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = types::ser_and_hash(x.as_ref());
+                    let hash = libcrypto::hash::Hash::<Transaction>::ser_and_hash(x.as_ref());
                     net_send.send((send_id, x)).await
                         .expect("Failed to send to the client");
                     cx.time_map.insert(hash, SystemTime::now());

@@ -1066,23 +1066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "node-synchs-rr"
-version = "0.1.0"
-dependencies = [
- "clap",
- "config",
- "consensus",
- "futures",
- "log",
- "net",
- "simple_logger 5.2.0",
- "synchs",
- "tokio",
- "types",
- "util",
-]
-
-[[package]]
 name = "normal-client-apollo"
 version = "0.1.0"
 dependencies = [

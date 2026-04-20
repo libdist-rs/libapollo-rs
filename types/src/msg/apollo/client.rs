@@ -1,28 +1,26 @@
-use serde::{Serialize, Deserialize};
-use super::*;
-use crate::Hash;
-use crate::WireReady;
+use libcrypto::hash::Hash;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use super::*;
+use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
-    /// RawNewBlock contains Proposal, Block, and Payload
-    /// Received directly from the network
-    /// After init this will be transformed into a NewBlock
+    /// Leader push of a new block; re-packaged into `NewBlock` during `init`.
     RawNewBlock(Propose, Block, Payload),
-    /// A processed message
+    /// A processed message the client actually sees.
     NewBlock(Propose, Payload),
-    /// Request an object with Hash
-    Request(Hash),
-    /// Respond with an object with Hash
-    RawResponse(Hash, Propose, Block),
-    Response(Hash, Propose),
+    /// Client asks a node to resend the block with the given hash.
+    Request(Hash<Block>),
+    RawResponse(Hash<Block>, Propose, Block),
+    Response(Hash<Block>, Propose),
 }
 
 impl WireReady for ClientMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c:Self = bincode::deserialize(bytes)
-            .expect("failed to decode the protocol message");
+        let c: Self =
+            bincode::deserialize(bytes).expect("failed to decode the client message");
         c.init()
     }
 
@@ -32,18 +30,17 @@ impl WireReady for ClientMsg {
                 block.hash = block.compute_hash();
                 prop.block = Some(Arc::new(block));
                 ClientMsg::NewBlock(prop, payload)
-            },
+            }
             ClientMsg::RawResponse(h, mut prop, mut block) => {
                 block.hash = block.compute_hash();
                 prop.block = Some(Arc::new(block));
                 ClientMsg::Response(h, prop)
             }
-            _x => _x,
+            other => other,
         }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).expect("Failed to serialize client message");
-        bytes
+        bincode::serialize(self).expect("Failed to serialize client message")
     }
 }

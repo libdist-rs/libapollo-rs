@@ -7,9 +7,6 @@ pub use msg::*;
 mod traits;
 pub use traits::*;
 
-pub mod hash;
-pub use hash::{do_hash, ser_and_hash, Hash, EMPTY_HASH, HASH_SIZE};
-
 pub type View = usize;
 
 /// Extension trait preserving the libchatter-rs `Keypair::sign(msg)` ergonomic

@@ -1,8 +1,8 @@
 use config::Client;
 use fnv::FnvHashMap as HashMap;
-use types::Hash;
+use libcrypto::hash::Hash;
 use std::{sync::Arc, convert::TryInto};
-use types::artemis::{Block, GENESIS_BLOCK, Payload, Round, Storage, UCRVote, Replica};
+use types::artemis::{Block, GENESIS_BLOCK, Payload, Round, Storage, Transaction, UCRVote, Replica};
 use std::time::SystemTime;
 use linked_hash_map::LinkedHashMap;
 
@@ -14,9 +14,9 @@ pub(crate) struct Context {
     /// The number of committed commands
     pub num_cmds: u128,
     /// `time_map` contains (h, t) holds the time `t` at which we sent the transaction with `h` 
-    pub time_map: HashMap<Hash, SystemTime>,
+    pub time_map: HashMap<Hash<Transaction>, SystemTime>,
     /// The latency map contains the (start time, end time) for every transaction with hash `h`
-    pub latency_map: HashMap<Hash, (SystemTime, SystemTime)>,
+    pub latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
     /// To hold all of our blocks
     pub storage: Storage,
     /// Prop chain
@@ -84,7 +84,7 @@ impl Context {
     /// - eligible_leaders
     fn compute_next_round_leader(&self) -> (Replica, usize) {
         let data = (self.round+1).to_be_bytes();
-        let h = types::do_hash(&data);
+        let h = libcrypto::hash::Hash::<Block>::do_hash(&data);
         let idx = usize::from_be_bytes(h.as_ref()[24..].try_into().unwrap()) % self.eligible_leaders.len();
         (self.eligible_leaders[idx], idx)
     }

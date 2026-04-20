@@ -1,4 +1,5 @@
-use types::{BlockTrait, artemis::{ClientMsg, Payload, ProtocolMsg, Replica, UCRVote}};
+use std::convert::TryFrom;
+use types::{BlockTrait, artemis::{Block, ClientMsg, Payload, ProtocolMsg, Replica, UCRVote}};
 use super::*;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -36,7 +37,8 @@ pub async fn do_round_vote(cx: &mut Context) {
     while cx.last_voted_block.get_hash() != tail {
         let b = cx.storage.delivered_block_from_hash(&tail).expect("Failed to get block");
         block_vec.push_front(b.as_ref().clone());
-        tail = b.blk.header.prev.clone();
+        tail = libcrypto::hash::Hash::<Block>::try_from(b.blk.header.prev.as_ref())
+            .expect("hash is exactly 32 bytes");
     }
     let block_vec = block_vec.into_iter().map(|b|{
         (b,Payload::empty())

@@ -1,4 +1,7 @@
+use std::convert::TryFrom;
+use libcrypto::hash::Hash;
 use types::BlockTrait;
+use types::artemis::Block;
 use super::*;
 
 /// Do commit is called to trigger committing of blocks
@@ -17,6 +20,7 @@ pub fn do_commit(cx: &mut Context) {
         let b = cx.storage.delivered_block_from_hash(&com_hash).unwrap();
         log::debug!("Committing block - {} in round {}", b.get_height(), v.round);
         cx.storage.add_committed_block(b.clone());
-        com_hash = b.blk.header.prev.clone();
+        com_hash = Hash::<Block>::try_from(b.blk.header.prev.as_ref())
+            .expect("hash is exactly 32 bytes");
     }
 }

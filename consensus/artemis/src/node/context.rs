@@ -1,5 +1,5 @@
 use std::{collections::VecDeque, convert::TryInto};
-use types::Hash;
+use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
 use types::KeypairSign;
 use futures::channel::mpsc::UnboundedSender;
@@ -59,7 +59,7 @@ pub struct Context {
     // Stuff related to message reordering
     /// The blocks we are waiting for, to handle vote messages
     /// If I get the `b` for this hash `h`, and `b` is delivered, then I can process this vote, and move it to `vote_ready`
-    pub vote_waiting: HashMap<Hash, UCRVote>,
+    pub vote_waiting: HashMap<Hash<Block>, UCRVote>,
     /// These are votes that were waiting, but got moved here when their blocks got delivered.
     pub vote_ready: HashMap<Round,UCRVote>,
     /// The actual blocks received from the view leader
@@ -78,10 +78,10 @@ pub struct Context {
 
     /// Block waiting (hash1, hash2)
     /// The block with hash2 is waiting for a block with hash1
-    pub block_parent_waiting: HashMap<Hash, Hash>,
+    pub block_parent_waiting: HashMap<Hash<Block>, Hash<Block>>,
     /// Undelivered blocks (h, b)
     /// The block b with hash h is waiting for something to get delivered
-    pub undelivered_blocks: HashMap<Hash, Block>,
+    pub undelivered_blocks: HashMap<Hash<Block>, Block>,
 }
 
 const EXTRA_SPACE:usize = 100;
@@ -192,7 +192,7 @@ impl Context {
     /// This is a private function that returns both the next leader and its index in the eligible leaders vector
     fn compute_next_round_leader(&self) -> (Replica, usize) {
         let data = (self.round+1).to_be_bytes();
-        let h = types::do_hash(&data);
+        let h = libcrypto::hash::Hash::<Block>::do_hash(&data);
         let idx = usize::from_be_bytes(h.as_ref()[24..].try_into().unwrap()) % self.eligible_leaders.len();
         (self.eligible_leaders[idx], idx)
     }

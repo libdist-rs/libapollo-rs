@@ -1,16 +1,16 @@
 use std::time::SystemTime;
 use fnv::FnvHashMap as HashMap;
 
-use types::apollo::{GENESIS_BLOCK, Propose, Round, Storage};
-use types::Hash;
+use types::apollo::{GENESIS_BLOCK, Propose, Round, Storage, Transaction};
+use libcrypto::hash::Hash;
 use std::sync::Arc;
 
 
 pub struct Context {
     pub pending: usize,
     pub num_cmds: u128,
-    pub time_map: HashMap<Hash, SystemTime>,
-    pub latency_map: HashMap<Hash, (SystemTime, SystemTime)>,
+    pub time_map: HashMap<Hash<Transaction>, SystemTime>,
+    pub latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
     pub storage: Storage,
     pub round: Round,
     pub future_msgs: HashMap<Round, Propose>,

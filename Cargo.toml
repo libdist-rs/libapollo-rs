@@ -16,7 +16,6 @@ members = [
     "examples/artemis/node",
     "examples/artemis/client",
     "examples/synchs/node",
-    "examples/synchs/node-rr",
     "examples/synchs/client",
     "examples/optsync/node",
     "examples/optsync/client",

@@ -1,9 +1,9 @@
 use std::time::SystemTime;
 use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use config::Client;
-use types::synchs::{ClientMsg, Transaction};
+use types::synchs::{Block, ClientMsg, Transaction};
 use tokio::sync::mpsc::channel;
-use types::Hash;
+use libcrypto::hash::Hash;
 use consensus::statistics;
 use std::sync::Arc;
 use util::codec::{EnCodec, Decodec};
@@ -37,8 +37,8 @@ pub async fn start(
     });
     let mut pending = window;
     let mut time_map = HashMap::default();
-    let mut count_map:HashMap<Hash, usize> = HashMap::default();
-    let mut finished_map:HashSet<Hash> = HashSet::default();
+    let mut count_map:HashMap<Hash<Block>, usize> = HashMap::default();
+    let mut finished_map:HashSet<Hash<Block>> = HashSet::default();
     let mut latency_map = HashMap::default();
     let mut num_cmds:u128 = 0;
 
@@ -47,7 +47,7 @@ pub async fn start(
         tokio::select! {
             tx_opt = recv.recv(), if pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = types::ser_and_hash(x.as_ref());
+                    let hash = libcrypto::hash::Hash::<Transaction>::ser_and_hash(x.as_ref());
                     net_send.send((send_id, x))
                         .expect("Failed to send to the client");
                     time_map.insert(hash, SystemTime::now());
