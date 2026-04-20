@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use super::{Transaction, Certificate};
 use crate::{BlockTrait, WireReady, protocol::{Replica, Height}};
-use crypto::hash::{EMPTY_HASH, Hash};
+use crate::{EMPTY_HASH, Hash};
 use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,7 +24,7 @@ impl Block {
     }
 
     pub fn compute_hash(&self) -> Hash {
-        crypto::hash::ser_and_hash(self)
+        crate::ser_and_hash(self)
     }
 }
 
@@ -62,7 +62,7 @@ impl WireReady for Block {
 
 impl BlockTrait for Block {
     fn get_hash(&self) -> Hash {
-        self.hash
+        self.hash.clone()
     }
 
     fn get_height(&self) -> Height {
@@ -83,7 +83,7 @@ impl Body {
     pub fn new(txs: Vec<Arc<Transaction>>) -> Self {
         let mut hashes = Vec::new();
         for tx in txs {
-            hashes.push(crypto::hash::ser_and_hash(tx.as_ref()));
+            hashes.push(crate::ser_and_hash(tx.as_ref()));
         }
         Self{
             tx_hashes: hashes,

@@ -1,4 +1,5 @@
-use crypto::{Keypair, PublicKey, hash::{EMPTY_HASH, Hash, ser_and_hash}};
+use crate::{ser_and_hash, EMPTY_HASH, Hash, KeypairSign};
+use libcrypto::{Keypair, PublicKey};
 use serde::{Serialize, Deserialize};
 
 use super::{Round, View, Vote};
@@ -32,19 +33,19 @@ impl UCRVote {
     /// If you change any of the above, don't forget to update the signature
     pub fn compute_sig(&mut self, sk:&Keypair) {
         let ser = ser_and_hash(&self.to_internal());
-        self.vote.auth = sk.sign(&ser)
+        self.vote.auth = sk.sign(ser.as_ref())
             .expect("Failed to sign a ucr message");
     }
 
     /// Check the signature on this message
     pub fn check_sig(&self, pk: &PublicKey) -> bool {
         let ser = ser_and_hash(&self.to_internal());
-        pk.verify(&ser, &self.vote.auth)
+        pk.verify(ser.as_ref(), &self.vote.auth)
     }
 
     fn to_internal(&self) -> InternalUCRVote {
         InternalUCRVote{
-            hash: self.hash,
+            hash: self.hash.clone(),
             round: self.round,
             view: self.view,
         }

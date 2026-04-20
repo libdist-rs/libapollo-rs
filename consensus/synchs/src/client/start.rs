@@ -3,7 +3,7 @@ use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use config::Client;
 use types::synchs::{ClientMsg, Transaction};
 use tokio::sync::mpsc::channel;
-use crypto::hash::Hash;
+use types::Hash;
 use consensus::statistics;
 use std::sync::Arc;
 use util::codec::{EnCodec, Decodec};
@@ -47,7 +47,7 @@ pub async fn start(
         tokio::select! {
             tx_opt = recv.recv(), if pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = crypto::hash::ser_and_hash(x.as_ref());
+                    let hash = types::ser_and_hash(x.as_ref());
                     net_send.send((send_id, x))
                         .expect("Failed to send to the client");
                     time_map.insert(hash, SystemTime::now());
@@ -72,17 +72,17 @@ pub async fn start(
                     log::debug!("got a block:{:?}",b);
                     
                     // Check if the block is valid?
-                    if !count_map.contains_key(&b.hash) {
-                        count_map.insert(b.hash, 1);
+                    if !count_map.contains_key(&b.hash.clone()) {
+                        count_map.insert(b.hash.clone(), 1);
                         continue;
                     }
-                    let ct = count_map.get(&b.hash).unwrap().clone();
+                    let ct = count_map.get(&b.hash.clone()).unwrap().clone();
                     if ct < c.num_faults {
-                        count_map.insert(b.hash, ct+1);
+                        count_map.insert(b.hash.clone(), ct+1);
                         continue;
                     }
                     let now = SystemTime::now();
-                    if finished_map.contains(&b.hash) {
+                    if finished_map.contains(&b.hash.clone()) {
                         continue;
                     }
                     pending += c.block_size;
@@ -96,7 +96,7 @@ pub async fn start(
                             num_cmds -= 1;
                         }
                     }
-                    finished_map.insert(b.hash);
+                    finished_map.insert(b.hash.clone());
                 } else {
                     panic!("invalid content received from the server");
                 }

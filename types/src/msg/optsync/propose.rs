@@ -1,4 +1,4 @@
-use crypto::hash::{EMPTY_HASH, Hash};
+use crate::{EMPTY_HASH, Hash};
 use serde::{Serialize, Deserialize};
 use super::{Certificate, View, Block};
 use std::sync::Arc;

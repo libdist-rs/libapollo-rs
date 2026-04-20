@@ -1,4 +1,4 @@
-use crypto::hash::Hash;
+use crate::Hash;
 use crate::{Height, Replica};
 use std::sync::Arc;
 

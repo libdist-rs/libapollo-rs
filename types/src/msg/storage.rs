@@ -1,6 +1,6 @@
 use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use crate::{BlockTrait, Height, TxTrait};
-use crypto::hash::Hash;
+use crate::Hash;
 use linked_hash_map::LinkedHashMap;
 use std::sync::Arc;
 

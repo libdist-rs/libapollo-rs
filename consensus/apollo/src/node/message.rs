@@ -55,12 +55,12 @@ pub async fn delivery_check(sender:Replica, p: Propose, cx: &mut Context) {
     }
 
     // Check if the parents are delivered
-    let parent_hash = p.block.as_ref().map(|b| b.header.prev);
+    let parent_hash = p.block.as_ref().map(|b| b.header.prev.clone());
     if parent_hash.is_none() {
         log::debug!(
-            "Block unknown: {:?}", p.block_hash);
-        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, p.block_hash));
-        cx.prop_waiting.insert(p.block_hash, p);
+            "Block unknown: {:?}", p.block_hash.clone());
+        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, p.block_hash.clone()));
+        cx.prop_waiting.insert(p.block_hash.clone(), p);
         cx.net_send.send((sender, msg)).await.unwrap();
         return;
     }
@@ -69,7 +69,7 @@ pub async fn delivery_check(sender:Replica, p: Propose, cx: &mut Context) {
     let parent_hash = parent_hash.unwrap();
 
     if !cx.storage.is_delivered_by_hash(&parent_hash) {
-        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, parent_hash));
+        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, parent_hash.clone()));
         cx.storage.add_delivered_block(p.block.clone().unwrap());
         cx.prop_waiting_parent.insert(parent_hash, p);
         cx.net_send.send((sender,msg)).await.unwrap();
@@ -85,7 +85,7 @@ pub async fn delivery_check(sender:Replica, p: Propose, cx: &mut Context) {
         "Block {} is delivered", block.header.height);
     cx.storage.add_delivered_block(block);
 
-    let mut block_hash = p.block_hash;
+    let mut block_hash = p.block_hash.clone();
     if cx.round() < p.round {
         cx.future_msgs.insert(p.round, (sender, p));
     } else {
@@ -94,7 +94,7 @@ pub async fn delivery_check(sender:Replica, p: Propose, cx: &mut Context) {
     cx.prop_waiting.remove(&block_hash);
 
     while let Some(mut p_new) = cx.prop_waiting_parent.remove(&block_hash) {
-        block_hash = p_new.block_hash;
+        block_hash = p_new.block_hash.clone();
         p_new.block = Some(cx.storage.delivered_block_from_hash(&block_hash).unwrap());
         if cx.round() < p_new.round {
             cx.future_msgs.insert(p_new.round, (sender, p_new));

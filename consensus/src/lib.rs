@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 use fnv::FnvHashMap as HashMap;
-use crypto::hash::Hash;
+use types::Hash;
 
 pub fn statistics(
     now: SystemTime, 

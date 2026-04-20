@@ -33,7 +33,7 @@ pub async fn on_recv_status(cert: Certificate, cx: &mut Context) {
     // We may seen a few votes from different nodes, but we are not sure if all
     // of the votes in this are valid
     let (sign_data, block_hash) = match &cert.msg {
-        CertType::Vote(ref _v, ref h) => (util::io::to_bytes(&cert.msg),*h),
+        CertType::Vote(ref _v, ref h) => (util::io::to_bytes(&cert.msg),h.clone()),
         _ => panic!("Quit view code unreachable"),
     };
 

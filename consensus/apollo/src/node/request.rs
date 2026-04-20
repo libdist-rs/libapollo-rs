@@ -1,4 +1,4 @@
-use crypto::hash::Hash;
+use types::Hash;
 use types::apollo::{ProtocolMsg, Replica};
 use super::context::Context;
 use std::sync::Arc;

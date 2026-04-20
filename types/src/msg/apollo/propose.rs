@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
-use crypto::{Keypair, PublicKey, hash::Hash};
+use crate::{Hash, KeypairSign};
+use libcrypto::{Keypair, PublicKey};
 use std::sync::Arc;
 use super::*;
 
@@ -28,13 +29,13 @@ impl Propose {
 
     /// How to generate a signature for the proposal
     pub fn sign_block(&mut self, b: &Block, sk: &Keypair) {
-        let auth = sk.sign(&crypto::hash::ser_and_hash(b))
+        let auth = sk.sign(crate::ser_and_hash(b).as_ref())
             .expect("Failed to sign a block");
         self.sig.auth = auth;
     }
 
     /// Check the signature of this proposal on the block
     pub fn check_sig(&self, b:&Block, pk: &PublicKey) -> bool {
-        pk.verify(&crypto::hash::ser_and_hash(b), &self.sig.auth)
+        pk.verify(crate::ser_and_hash(b).as_ref(), &self.sig.auth)
     }
 }

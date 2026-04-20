@@ -3,7 +3,7 @@ use serde::{
     Deserialize
 };
 use types::Replica;
-use crypto::Algorithm;
+use libcrypto::Algorithm;
 use fnv::FnvHashMap as HashMap;
 use super::{
     ParseError,
@@ -43,28 +43,17 @@ impl Client {
             }
         }
         match self.crypto_alg {
-            Algorithm::ED25519 => {
-                for repl in &self.server_pk {
-                    if !is_valid_replica(*repl.0, self.num_nodes) {
-                        return Err(ParseError::InvalidMapEntry(*repl.0));
+            Algorithm::ED25519 | Algorithm::SECP256K1 => {
+                for (id, pk_bytes) in &self.server_pk {
+                    if !is_valid_replica(*id, self.num_nodes) {
+                        return Err(ParseError::InvalidMapEntry(*id));
                     }
-                    if repl.1.len() != crypto::ED25519_PK_SIZE {
-                        return Err(ParseError::InvalidPkSize(repl.1.len()));
-                    }
-                }
-            }
-            Algorithm::SECP256K1 => {
-                for repl in &self.server_pk {
-                    if !is_valid_replica(*repl.0, self.num_nodes) {
-                        return Err(ParseError::InvalidMapEntry(*repl.0));
-                    }
-                    if repl.1.len() != crypto::SECP256K1_PK_SIZE {
-                        return Err(ParseError::InvalidPkSize(repl.1.len()));
+                    if pk_bytes.is_empty() {
+                        return Err(ParseError::InvalidPkSize(pk_bytes.len()));
                     }
                 }
             }
             Algorithm::RSA => {
-                // Because unimplemented
                 return Err(ParseError::Unimplemented("RSA"));
             }
         }

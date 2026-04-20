@@ -32,11 +32,11 @@ pub async fn do_round_vote(cx: &mut Context) {
     let msg = Arc::new(ProtocolMsg::RawUCRVote(v.clone()));
     cx.multicast(msg).await;
     let mut block_vec = VecDeque::new();
-    let mut tail = v.hash;
+    let mut tail = v.hash.clone();
     while cx.last_voted_block.get_hash() != tail {
         let b = cx.storage.delivered_block_from_hash(&tail).expect("Failed to get block");
         block_vec.push_front(b.as_ref().clone());
-        tail = b.blk.header.prev;
+        tail = b.blk.header.prev.clone();
     }
     let block_vec = block_vec.into_iter().map(|b|{
         (b,Payload::empty())
@@ -61,13 +61,13 @@ pub async fn try_receive_round_vote(cx:&mut Context, from: Replica, ucr_vote: UC
         // We got a ucr_vote from the future
         log::debug!("Got a vote for round {} from the future for {}", ucr_vote.round, cx.round());
         // What TODO? Keep it ready until we move to this round
-        if cx.storage.is_delivered_by_hash(&ucr_vote.hash) {
+        if cx.storage.is_delivered_by_hash(&ucr_vote.hash.clone()) {
             cx.vote_ready.insert(ucr_vote.round, ucr_vote);
         } else {
             // I don't have the chain for this. Ask chain from the sender
-            let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash));
+            let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash.clone()));
             let job = cx.c_send(from, msg).await;
-            cx.vote_waiting.insert(ucr_vote.hash, ucr_vote);
+            cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
             job.await.unwrap();
         }
         // cx.vote_ready.insert(ucr_vote.round, ucr_vote);
@@ -76,11 +76,11 @@ pub async fn try_receive_round_vote(cx:&mut Context, from: Replica, ucr_vote: UC
 
     // cx.future_votes.remove(&cx.round());
     // Do I have the chain?
-    if !cx.storage.is_delivered_by_hash(&ucr_vote.hash) {
+    if !cx.storage.is_delivered_by_hash(&ucr_vote.hash.clone()) {
         // I don't have the chain for this. Ask chain from the sender
-        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash));
+        let msg = Arc::new(ProtocolMsg::Request(cx.req_ctr, ucr_vote.hash.clone()));
         let job = cx.c_send(from, msg).await;
-        cx.vote_waiting.insert(ucr_vote.hash, ucr_vote);
+        cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
         job.await.unwrap();
         return;
     }
@@ -114,7 +114,7 @@ pub async fn on_receive_round_vote(cx:&mut Context, ucr_vote: UCRVote) {
     }
 
     // Update the last voted block
-    let last_voted_block = cx.storage.delivered_block_from_hash(&ucr_vote.hash)
+    let last_voted_block = cx.storage.delivered_block_from_hash(&ucr_vote.hash.clone())
         .expect("Obtained a vote for an unknown hash");
     cx.last_voted_block = last_voted_block.clone();
     

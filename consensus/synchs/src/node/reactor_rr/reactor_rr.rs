@@ -122,7 +122,7 @@ async fn try_propose(c: &Node, cx: &mut Context, d2: &Duration) {
     // Also, do we have sufficient votes?
     let is_pool_suff = cx.storage.get_tx_pool_size() >= c.block_size; 
     let am_i_leader = cx.next_leader() == c.id;
-    let is_no_cert = cx.cert_map.contains_key(&cx.last_seen_block.hash);
+    let is_no_cert = cx.cert_map.contains_key(&cx.last_seen_block.hash.clone());
     let is_wrong_phase = cx.phase == Phase::Propose;
 
     // log::debug!("Not proposing because: {} {} {} {}", is_pool_suff, am_i_leader, is_no_cert, is_wrong_phase);

@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use fnv::FnvHashMap as HashMap;
-use crypto::hash::Hash;
-use crypto::{Keypair, PublicKey, ed25519, secp256k1};
+use types::Hash;
+use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
+use types::KeypairSign;
 use futures::channel::mpsc::UnboundedSender;
 use types::apollo::{Block, GENESIS_BLOCK, Propose, ProtocolMsg, Replica, Storage, Round};
 use config::Node;
@@ -66,17 +67,12 @@ impl Context {
             num_faults: config.num_faults,
             myid: config.id,
             my_secret_key: match config.crypto_alg {
-                crypto::Algorithm::ED25519 => {
-                    let mut sk_copy = config.secret_key_bytes.clone();
-                    let kp = ed25519::Keypair::decode(
-                        &mut sk_copy
-                    ).expect("Failed to decode the secret key from the config");
-                    Arc::new(Keypair::Ed25519(kp))
+                libcrypto::Algorithm::ED25519 => {
+                    let kp: libcrypto::ed25519::Keypair = bincode::deserialize(&config.secret_key_bytes).expect("Failed to decode the secret key from the config");
+                    Arc::new(Keypair::Ed25519(Box::new(kp)))
                 },
-                crypto::Algorithm::SECP256K1 => {
-                    let sk_copy = config.secret_key_bytes.clone();
-                    let sk = secp256k1::SecretKey::from_bytes(sk_copy).expect("Failed to decode the secret key from the config");
-                    let kp = secp256k1::Keypair::from(sk);
+                libcrypto::Algorithm::SECP256K1 => {
+                    let kp: libcrypto::secp256k1::Keypair = bincode::deserialize(&config.secret_key_bytes).expect("Failed to decode the secret key from the config");
                     Arc::new(Keypair::Secp256k1(kp))
                 }
                 _ => panic!("Unimplemented algorithm"),
@@ -98,19 +94,17 @@ impl Context {
             prop_buf: VecDeque::new(),
             other_buf: VecDeque::new(),
         };
-        for (id,mut pk_data) in &config.pk_map {
+        for (id, pk_data) in &config.pk_map {
             if *id == c.myid {
                 continue;
             }
             let pk = match config.crypto_alg {
-                crypto::Algorithm::ED25519 => {
-                    let kp = ed25519::PublicKey::decode(
-                        &mut pk_data
-                    ).expect("Failed to decode the secret key from the config");
+                libcrypto::Algorithm::ED25519 => {
+                    let kp: libcrypto::ed25519::PublicKey = bincode::deserialize(pk_data).expect("Failed to decode the secret key from the config");
                     PublicKey::Ed25519(kp)
                 },
-                crypto::Algorithm::SECP256K1 => {
-                    let sk = secp256k1::PublicKey::decode(&pk_data).expect("Failed to decode the secret key from the config");
+                libcrypto::Algorithm::SECP256K1 => {
+                    let sk: libcrypto::secp256k1::PublicKey = bincode::deserialize(pk_data).expect("Failed to decode the secret key from the config");
                     PublicKey::Secp256k1(sk)
                 }
                 _ => panic!("Unimplemented algorithm"),

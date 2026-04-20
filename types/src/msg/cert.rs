@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use crate::{Replica, Vote, View};
-use crypto::hash::Hash;
+use crate::Hash;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum CertType {

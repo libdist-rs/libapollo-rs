@@ -1,5 +1,6 @@
 use crate::{BlockTrait, WireReady};
-use crypto::{Keypair, PublicKey, hash::Hash};
+use crate::{Hash, KeypairSign};
+use libcrypto::{Keypair, PublicKey};
 use super::super::Block as OldBlock;
 use super::{Vote, Replica, Height, Transaction};
 use crate::GENESIS_BLOCK as OldGenesis;
@@ -34,12 +35,12 @@ impl Block {
 
     /// Checks if the block is signed correctly by the holder of pk
     pub fn check_sig(&self, pk: &PublicKey) -> bool {
-        pk.verify(&self.blk.hash, &self.sig.auth)
+        pk.verify(self.blk.hash.as_ref(), &self.sig.auth)
     }
 
     /// Adds a signature to the block. Make sure that the block is initialized (i.e., the hash is set properly)
     pub fn sign(&mut self, sk: &Keypair) {
-        let auth = sk.sign(&self.blk.hash)
+        let auth = sk.sign(self.blk.hash.as_ref())
             .expect("Failed to sign the block");
         self.sig.auth = auth;
     }

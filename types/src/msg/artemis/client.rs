@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use super::{Block, Payload, UCRVote};
-use crypto::hash::Hash; 
+use crate::Hash; 
 use crate::{BlockTrait, WireReady};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

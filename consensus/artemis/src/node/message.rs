@@ -63,7 +63,7 @@ pub async fn update_delivery(cx:&mut Context, b: Block, sender: Replica) {
     if cx.storage.is_delivered_by_hash(&b.get_hash()) {
         return;
     }
-    let p_hash = b.blk.header.prev;
+    let p_hash = b.blk.header.prev.clone();
     let is_parent_delivered = cx.storage.is_delivered_by_hash(
         &p_hash);
     if cx.block_parent_waiting.contains_key(&p_hash) {
@@ -73,8 +73,8 @@ pub async fn update_delivery(cx:&mut Context, b: Block, sender: Replica) {
     }
     let b_hash = b.get_hash();
     if !is_parent_delivered {
-        cx.block_parent_waiting.insert(p_hash, b_hash);
-        cx.undelivered_blocks.insert(b_hash, b);
+        cx.block_parent_waiting.insert(p_hash, b_hash.clone());
+        cx.undelivered_blocks.insert(b_hash.clone(), b);
         do_request(cx, sender, b_hash).await;
         return;
     }

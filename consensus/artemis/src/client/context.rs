@@ -1,6 +1,6 @@
 use config::Client;
 use fnv::FnvHashMap as HashMap;
-use crypto::hash::Hash;
+use types::Hash;
 use std::{sync::Arc, convert::TryInto};
 use types::artemis::{Block, GENESIS_BLOCK, Payload, Round, Storage, UCRVote, Replica};
 use std::time::SystemTime;
@@ -84,8 +84,8 @@ impl Context {
     /// - eligible_leaders
     fn compute_next_round_leader(&self) -> (Replica, usize) {
         let data = (self.round+1).to_be_bytes();
-        let h = crypto::hash::do_hash(&data);
-        let idx = usize::from_be_bytes(h[24..].try_into().unwrap()) % self.eligible_leaders.len();
+        let h = types::do_hash(&data);
+        let idx = usize::from_be_bytes(h.as_ref()[24..].try_into().unwrap()) % self.eligible_leaders.len();
         (self.eligible_leaders[idx], idx)
     }
 

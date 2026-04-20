@@ -10,8 +10,9 @@ edition = "2018"
 clap = {version = "2", features = ["yaml"]}
 config = { package = "config", path="../../config"}
 types = { package = "types", path="../../types"}
-crypto = { package = "crypto", path="../../crypto"}
+libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs", tag = "v0.3.2" }
 util = { package = "util", path="../../util"}
 openssl = "0.10"
 rustls = "*"
 fnv = "1"
+bincode = "1"

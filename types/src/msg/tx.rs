@@ -1,4 +1,4 @@
-use crypto::hash::Hash;
+use crate::Hash;
 use serde::{Serialize, Deserialize};
 
 use crate::{TxTrait, WireReady};
@@ -11,7 +11,7 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn compute_hash(&self) -> Hash {
-        crypto::hash::ser_and_hash(self)
+        crate::ser_and_hash(self)
     }
 
     pub fn new_dummy_tx(i:u64, payload:usize) -> Self {

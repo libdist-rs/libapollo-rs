@@ -1,6 +1,6 @@
 use log::debug;
 use types::optsync::{CertType, Certificate, Propose};
-use crypto::hash::Hash;
+use types::Hash;
 use crate::node::context::Context;
 use std::sync::Arc;
 
@@ -21,14 +21,13 @@ pub fn add_vote(mut c: Certificate, hash: Hash, cx: &mut Context) -> bool {
     cert.votes.push(c.votes.pop().unwrap());
     // Promote it to a full certificate if it has f+1 signatures
     if cert.votes.len() >= (3*cx.num_nodes)/4 {
-        cx.resp_cert.insert(hash, Arc::new(cert.clone()));
+        cx.resp_cert.insert(hash.clone(), Arc::new(cert.clone()));
         // Responsive certificate found
         debug!("Responsive certificate formed");
         commit_decision = true;
-    }// A weird case for n=3. Optimistic responsiveness requires 2 signatures and even normal certificates require 2 signatures, hence the separation of the two if conditions.
-    // If n>3, we can save a nanocycles by combining this into 1 if-else if-else branch or even match on cert.votes.len() for case >3n/4, case >f default.
+    }
     if cert.votes.len() > cx.num_faults {
-        cx.cert_map.insert(hash, cert.clone());
+        cx.cert_map.insert(hash.clone(), cert.clone());
         cx.last_seen_cert = cert.clone();
     }
     cx.vote_map.insert(hash, cert);
@@ -54,7 +53,7 @@ pub async fn on_vote(c: Certificate, p: &mut Propose, cx: &mut Context) -> bool 
         Some(x) => x,
     };
     let (sign_data, blk_hash) = match &c.msg {
-        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), *d),
+        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), d.clone()),
         _ => unreachable!("other vote types cant be here"),
     };
 

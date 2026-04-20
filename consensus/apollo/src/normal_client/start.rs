@@ -7,7 +7,7 @@ use fnv::FnvHashSet as HashSet;
 use config::Client;
 use types::apollo::{Block, ClientMsg, Transaction};
 use futures::channel::mpsc::channel;
-use crypto::hash::Hash;
+use types::Hash;
 use consensus::statistics;
 use std::sync::Arc;
 use util::codec::EnCodec;
@@ -89,7 +89,7 @@ pub async fn start(
         tokio::select! {
             tx_opt = recv.next(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = crypto::hash::ser_and_hash(x.as_ref());
+                    let hash = types::ser_and_hash(x.as_ref());
                     net_send.send((send_id, x)).await
                         .expect("Failed to send to the client");
                     cx.time_map.insert(hash, SystemTime::now());
@@ -133,16 +133,16 @@ fn process_blocks(c:&Client, now: SystemTime, new_blocks: &mut VecDeque<Arc<Bloc
     log::debug!("Before processing: {:?}", cx);
     for b in new_blocks.into_iter() {
         // Check if the block is valid?
-        if !cx.count_map.contains_key(&b.hash) {
-            cx.count_map.insert(b.hash, 1);
+        if !cx.count_map.contains_key(&b.hash.clone()) {
+            cx.count_map.insert(b.hash.clone(), 1);
             continue;
         }
-        let ct = cx.count_map.get(&b.hash).unwrap().clone();
+        let ct = cx.count_map.get(&b.hash.clone()).unwrap().clone();
         if ct < c.num_faults {
-            cx.count_map.insert(b.hash, ct+1);
+            cx.count_map.insert(b.hash.clone(), ct+1);
             continue;
         }
-        if cx.finished_map.contains(&b.hash) {
+        if cx.finished_map.contains(&b.hash.clone()) {
             continue;
         }
         cx.pending += c.block_size;
@@ -156,7 +156,7 @@ fn process_blocks(c:&Client, now: SystemTime, new_blocks: &mut VecDeque<Arc<Bloc
                 cx.num_cmds -= 1;
             }
         }
-        cx.finished_map.insert(b.hash);
+        cx.finished_map.insert(b.hash.clone());
     }
     log::debug!("After processing: {:?}", cx);
 }

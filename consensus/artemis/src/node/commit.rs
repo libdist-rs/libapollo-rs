@@ -11,12 +11,12 @@ pub fn do_commit(cx: &mut Context) {
     let commit_round = cx.round() - cx.num_faults();
     let v = cx.vote_chain.get(&commit_round).unwrap();    
 
-    let mut com_hash = v.hash;
+    let mut com_hash = v.hash.clone();
     // Commit com_hash and its parents
     while !cx.storage.is_committed_by_hash(&com_hash) {
         let b = cx.storage.delivered_block_from_hash(&com_hash).unwrap();
         log::debug!("Committing block - {} in round {}", b.get_height(), v.round);
         cx.storage.add_committed_block(b.clone());
-        com_hash = b.blk.header.prev;
+        com_hash = b.blk.header.prev.clone();
     }
 }

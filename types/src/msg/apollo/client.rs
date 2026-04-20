@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use super::*;
-use crypto::hash::Hash;
+use crate::Hash;
 use crate::WireReady;
 use std::sync::Arc;
 

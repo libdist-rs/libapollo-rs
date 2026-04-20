@@ -1,3 +1,4 @@
+use types::KeypairSign;
 use types::{BlockTrait, artemis::{Block, ProtocolMsg, Transaction}};
 use types::WireReady;
 use super::context::Context;
@@ -33,7 +34,7 @@ pub async fn on_receive_new_block_direct(cx:&mut Context, blk: Block) {
     }
     
     // Check if the block is delivered
-    if !cx.storage.is_delivered_by_hash(&blk.blk.header.prev) {
+    if !cx.storage.is_delivered_by_hash(&blk.blk.header.prev.clone()) {
         log::warn!("View leader sent out of order blocks");
         return;
     }

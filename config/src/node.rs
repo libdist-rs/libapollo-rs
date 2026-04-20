@@ -3,7 +3,7 @@ use serde::{
     Deserialize
 };
 use types::Replica;
-use crypto::Algorithm;
+use libcrypto::Algorithm;
 use fnv::FnvHashMap as HashMap;
 use super::{
     ParseError,
@@ -53,34 +53,24 @@ impl Node {
             }
         }
         match self.crypto_alg {
-            Algorithm::ED25519 => {
-                for repl in &self.pk_map {
-                    if !is_valid_replica(*repl.0, self.num_nodes) {
-                        return Err(ParseError::InvalidMapEntry(*repl.0));
+            Algorithm::ED25519 | Algorithm::SECP256K1 => {
+                // Keys are bincode-serialized libcrypto::<alg>::Keypair / PublicKey
+                // blobs -- their exact byte length depends on serde, so we only
+                // sanity-check presence here; decoding errors surface at node
+                // startup when the key is actually parsed.
+                for (id, pk_bytes) in &self.pk_map {
+                    if !is_valid_replica(*id, self.num_nodes) {
+                        return Err(ParseError::InvalidMapEntry(*id));
                     }
-                    if repl.1.len() != crypto::ED25519_PK_SIZE {
-                        return Err(ParseError::InvalidPkSize(repl.1.len()));
-                    }
-                }
-                if self.secret_key_bytes.len() != crypto::ED25519_PVT_SIZE {
-                    return Err(ParseError::InvalidSkSize(self.secret_key_bytes.len()));
-                }
-            }
-            Algorithm::SECP256K1 => {
-                for repl in &self.pk_map {
-                    if !is_valid_replica(*repl.0, self.num_nodes) {
-                        return Err(ParseError::InvalidMapEntry(*repl.0));
-                    }
-                    if repl.1.len() != crypto::SECP256K1_PK_SIZE {
-                        return Err(ParseError::InvalidPkSize(repl.1.len()));
+                    if pk_bytes.is_empty() {
+                        return Err(ParseError::InvalidPkSize(pk_bytes.len()));
                     }
                 }
-                if self.secret_key_bytes.len() != crypto::SECP256K1_PVT_SIZE {
+                if self.secret_key_bytes.is_empty() {
                     return Err(ParseError::InvalidSkSize(self.secret_key_bytes.len()));
                 }
             }
             Algorithm::RSA => {
-                // Because unimplemented
                 return Err(ParseError::Unimplemented("RSA"));
             }
         }

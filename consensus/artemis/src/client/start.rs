@@ -59,7 +59,7 @@ pub async fn start(
                     let tx = x.as_ref();
                     net_send.send((c.num_nodes,x.clone())).await
                         .expect("Failed to send to the client");
-                    let hash = crypto::hash::ser_and_hash(tx);
+                    let hash = types::ser_and_hash(tx);
                     cx.time_map.insert(hash, SystemTime::now());
                     cx.pending -= 1;
                     log::debug!("Sending transaction to the leader");
@@ -140,11 +140,11 @@ async fn new_round(v: UCRVote,
     let v = cx.prop_chain.get(&com_round)
         .expect("Must have in prop map");
 
-    let mut com_hash = v.hash;
+    let mut com_hash = v.hash.clone();
     while !cx.storage.is_committed_by_hash(&com_hash) {
         let b_rc = cx.storage.delivered_block_from_hash(&com_hash).expect("Trying to commit an undelivered block");
         cx.storage.add_committed_block(b_rc.clone());
-        com_hash = b_rc.blk.header.prev;
+        com_hash = b_rc.blk.header.prev.clone();
         // For every committed block, update the statistics
         for tx_hash in &b_rc.blk.body.tx_hashes {
             if let Some(start) = cx.time_map.remove(tx_hash) {

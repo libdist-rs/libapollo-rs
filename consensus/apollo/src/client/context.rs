@@ -2,7 +2,7 @@ use std::time::SystemTime;
 use fnv::FnvHashMap as HashMap;
 
 use types::apollo::{GENESIS_BLOCK, Propose, Round, Storage};
-use crypto::hash::Hash;
+use types::Hash;
 use std::sync::Arc;
 
 

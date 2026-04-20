@@ -66,7 +66,7 @@ pub async fn start(
             update_props(prop, &mut cx);
             while let Some(p) = cx.future_msgs.remove(&cx.round) {
                 let b = p.block.clone().unwrap();
-                if !cx.storage.is_delivered_by_hash(&b.header.prev) {
+                if !cx.storage.is_delivered_by_hash(&b.header.prev.clone()) {
                     panic!("Got an undelivered block");
                 }
                 cx.storage.add_delivered_block(b);
@@ -87,7 +87,7 @@ pub async fn start(
             tx_opt = recv.recv(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
                     let tx = x.as_ref();
-                    let hash = crypto::hash::ser_and_hash(tx);
+                    let hash = types::ser_and_hash(tx);
                     net_send.send((send_id,x)).await
                         .expect("Failed to send to the client");
                     cx.time_map.insert(hash, SystemTime::now());
@@ -128,7 +128,7 @@ pub async fn start(
 
 fn update_props(p: Propose, cx:&mut Context) {
     if p.round < cx.round {
-        if cx.storage.is_delivered_by_hash(&p.block_hash) {
+        if cx.storage.is_delivered_by_hash(&p.block_hash.clone()) {
             log::warn!("Got a block {} from the past - {}", p.round, cx.round);
             return;
         } else {
@@ -144,7 +144,7 @@ fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
     while let Some(p) = cx.future_msgs.remove(&cx.round) {
         let b = p.block.clone().unwrap();
         cx.storage.add_delivered_block(b.clone());
-        if !cx.storage.is_delivered_by_hash(&b.header.prev) {
+        if !cx.storage.is_delivered_by_hash(&b.header.prev.clone()) {
             panic!("Do not have parent for this block {:?}, yet",b);
         }
         cx.pending += c.block_size;

@@ -1,5 +1,5 @@
 use serde::{Serialize, Deserialize};
-use crypto::hash::Hash;
+use crate::Hash;
 use std::sync::Arc;
 use crate::Block;
 

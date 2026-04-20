@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use super::{Block, Propose, Vote};
 use crate::WireReady;
-use crypto::hash::Hash;
+use crate::Hash;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

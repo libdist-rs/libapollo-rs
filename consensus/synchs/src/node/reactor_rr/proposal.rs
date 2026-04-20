@@ -1,6 +1,7 @@
+use types::KeypairSign;
 use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use super::{context::Context, phase::Phase};
-use crypto::hash::EMPTY_HASH;
+use types::EMPTY_HASH;
 use types::synchs_rr::{
     Block, CertType, Certificate, Transaction, Vote, 
     Propose, ProtocolMsg
@@ -34,7 +35,7 @@ pub fn check_proposal(p: Arc<Propose>, cx:&Context) -> bool {
 
     // Check signature for the proposal
     let pk = cx.pub_key_map.get(&new_block.header.author).unwrap();
-    if !pk.verify(&new_block.hash, &p.proof) {
+    if !pk.verify(new_block.hash.as_ref(), &p.proof) {
         log::warn!(
             "Got an incorrectly signed block");
         return false;
@@ -105,7 +106,7 @@ pub async fn on_receive_proposal(p: Arc<Propose>, cx: &mut Context) -> bool {
 
     log::debug!("Received a proposal of height: {}", new_block.header.height);
 
-    if cx.storage.is_delivered_by_hash(&new_block.hash) {
+    if cx.storage.is_delivered_by_hash(&new_block.hash.clone()) {
         log::debug!("We have already processed this block last time");
         return decision;
     }
@@ -124,7 +125,7 @@ pub async fn on_new_valid_proposal(p: Arc<Propose>, cx: &mut Context) -> bool {
     let new_block = p.block.clone().unwrap();
 
     // Is the parent delivered?
-    if !cx.storage.is_delivered_by_hash(&new_block.header.prev) 
+    if !cx.storage.is_delivered_by_hash(&new_block.header.prev.clone()) 
     {
         log::warn!(
             "We do not have the parent for this block");
@@ -137,7 +138,7 @@ pub async fn on_new_valid_proposal(p: Arc<Propose>, cx: &mut Context) -> bool {
     // Everything looks fine, initiate voting and continue to process this
     // proposal
     let mut my_vote = Certificate::empty_cert();
-    my_vote.msg = CertType::Vote(cx.view, new_block.hash);
+    my_vote.msg = CertType::Vote(cx.view, new_block.hash.clone());
     let sign_data = util::io::to_bytes(&my_vote.msg);
     match cx.my_secret_key.sign(&sign_data) {
         Err(e) => {
@@ -155,7 +156,7 @@ pub async fn on_new_valid_proposal(p: Arc<Propose>, cx: &mut Context) -> bool {
     // Add self vote to the map
     let mut new_map = HashMap::default();
     new_map.insert(cx.myid, my_vote.clone());
-    cx.vote_map.insert(new_block.hash, new_map);
+    cx.vote_map.insert(new_block.hash.clone(), new_map);
 
     decision = true;
 
@@ -200,14 +201,14 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> Arc<Pro
 
     // Update block contents here
     new_block.header.author = cx.myid;
-    new_block.header.prev = parent.hash;
+    new_block.header.prev = parent.hash.clone();
     new_block.header.height = parent.header.height+1;
     
     // Update the hash at the end
     new_block.hash = new_block.compute_hash();
     
     // Sign the block hash 
-    let proof = match cx.my_secret_key.sign(&new_block.hash) {
+    let proof = match cx.my_secret_key.sign(new_block.hash.as_ref()) {
         Err(e) => {
             panic!("Failed to sign the new proposal: {}", e);
         },
@@ -215,7 +216,7 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> Arc<Pro
     };
 
     let mut new_block_cert = Certificate::empty_cert();
-    new_block_cert.msg = CertType::Vote(cx.view, new_block.hash);
+    new_block_cert.msg = CertType::Vote(cx.view, new_block.hash.clone());
     let sign_data = util::io::to_bytes(&new_block_cert.msg);
     let sig = match cx.my_secret_key.sign(&sign_data) {
         Err(e) => {
@@ -238,8 +239,8 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> Arc<Pro
     let mut p = Propose::new();
     p.proof = proof;
     p.block = Some(new_block_ref.clone());
-    p.block_hash = new_block_ref.hash;
-    p.cert = match cx.cert_map.get(&parent.hash) {
+    p.block_hash = new_block_ref.hash.clone();
+    p.cert = match cx.cert_map.get(&parent.hash.clone()) {
         None => {
             panic!("Must call propose only if the parent is certified");
         },
@@ -271,7 +272,7 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> Arc<Pro
     // Commit normally, and tell the client after 2\Delta
     let mut new_vote_map = HashMap::default();
     new_vote_map.insert(cx.myid,new_block_cert);
-    cx.vote_map.insert(new_block_ref.hash, new_vote_map);
+    cx.vote_map.insert(new_block_ref.hash.clone(), new_vote_map);
     cx.height = new_block_ref.header.height;
     // The leader remains the same
     cx.last_seen_block = new_block_ref.clone();

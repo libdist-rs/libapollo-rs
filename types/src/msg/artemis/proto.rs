@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use super::{Block, UCRVote, Vote};
 use crate::WireReady;
-use crypto::hash::Hash;
+use crate::Hash;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[repr(u8)]

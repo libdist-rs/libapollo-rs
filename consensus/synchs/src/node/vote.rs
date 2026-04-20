@@ -1,5 +1,5 @@
 use types::synchs::{CertType, Certificate, Propose};
-use crypto::hash::Hash;
+use types::Hash;
 use super::{
     context::Context, 
     proposal::{
@@ -53,7 +53,7 @@ pub async fn on_vote(c: Certificate, mut p: Propose, cx: &mut Context) -> bool {
         Some(x) => x,
     };
     let (sign_data, blk_hash) = match &c.msg {
-        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), *d),
+        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), d.clone()),
         _ => unreachable!("other vote types cant be here"),
     };
 

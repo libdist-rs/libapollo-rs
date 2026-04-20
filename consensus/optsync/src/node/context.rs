@@ -2,9 +2,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::time::DelayQueue;
 use types::optsync::{Block, Certificate, GENESIS_BLOCK, Height, Replica, Storage, View, ClientMsg, ProtocolMsg, Propose};
 use config::Node;
-use crypto::{Keypair, PublicKey, ed25519, secp256k1};
+use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
+use types::KeypairSign;
 use fnv::FnvHashMap as HashMap;
-use crypto::hash::Hash;
+use types::Hash;
 use std::{sync::Arc, time::Duration};
 
 pub struct Context {
@@ -51,17 +52,12 @@ impl Context {
             num_nodes: config.num_nodes,
             cli_send,
             my_secret_key: match config.crypto_alg {
-                crypto::Algorithm::ED25519 => {
-                    let mut sk_copy = config.secret_key_bytes.clone();
-                    let kp = ed25519::Keypair::decode(
-                        &mut sk_copy
-                    ).expect("Failed to decode the secret key from the config");
-                    Keypair::Ed25519(kp)
+                libcrypto::Algorithm::ED25519 => {
+                    let kp: libcrypto::ed25519::Keypair = bincode::deserialize(&config.secret_key_bytes).expect("Failed to decode the secret key from the config");
+                    Keypair::Ed25519(Box::new(kp))
                 },
-                crypto::Algorithm::SECP256K1 => {
-                    let sk_copy = config.secret_key_bytes.clone();
-                    let sk = secp256k1::SecretKey::from_bytes(sk_copy).expect("Failed to decode the secret key from the config");
-                    let kp = secp256k1::Keypair::from(sk);
+                libcrypto::Algorithm::SECP256K1 => {
+                    let kp: libcrypto::secp256k1::Keypair = bincode::deserialize(&config.secret_key_bytes).expect("Failed to decode the secret key from the config");
                     Keypair::Secp256k1(kp)
                 }
                 _ => panic!("Unimplemented algorithm"),
@@ -83,16 +79,14 @@ impl Context {
             payload:config.payload*config.block_size,
             commit_queue: tokio_util::time::DelayQueue::new(),
         };
-        for (id,mut pk_data) in config.pk_map.clone() {
+        for (id, pk_data) in config.pk_map.clone() {
             let pk = match config.crypto_alg {
-                crypto::Algorithm::ED25519 => {
-                    let kp = ed25519::PublicKey::decode(
-                        &mut pk_data
-                    ).expect("Failed to decode the secret key from the config");
+                libcrypto::Algorithm::ED25519 => {
+                    let kp: libcrypto::ed25519::PublicKey = bincode::deserialize(&pk_data).expect("Failed to decode the secret key from the config");
                     PublicKey::Ed25519(kp)
                 },
-                crypto::Algorithm::SECP256K1 => {
-                    let sk = secp256k1::PublicKey::decode(&pk_data).expect("Failed to decode the secret key from the config");
+                libcrypto::Algorithm::SECP256K1 => {
+                    let sk: libcrypto::secp256k1::PublicKey = bincode::deserialize(&pk_data).expect("Failed to decode the secret key from the config");
                     PublicKey::Secp256k1(sk)
                 }
                 _ => panic!("Unimplemented algorithm"),
@@ -103,7 +97,7 @@ impl Context {
         // Initialize storage
         c.storage.add_delivered_block(genesis_arc.clone());
         c.storage.add_committed_block(genesis_arc);
-        c.cert_map.insert(GENESIS_BLOCK.hash, Certificate::empty_cert());
+        c.cert_map.insert(GENESIS_BLOCK.hash.clone(), Certificate::empty_cert());
         c
     }
 

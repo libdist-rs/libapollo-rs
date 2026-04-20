@@ -73,7 +73,7 @@ pub async fn reactor(
         // Also, do we have sufficient votes?
         if cx.storage.get_tx_pool_size() >= block_size && 
             cx.next_leader() == myid && 
-            cx.cert_map.contains_key(&cx.last_seen_block.hash)
+            cx.cert_map.contains_key(&cx.last_seen_block.hash.clone())
         {
             log::debug!("I {} am the leader and, I am proposing", cx.myid);
             let txs = cx.storage.cleave(block_size);

@@ -1,5 +1,5 @@
 use types::synchs_rr::{CertType, Certificate, View, Propose, ProtocolMsg};
-use crypto::hash::Hash;
+use types::Hash;
 use super::{context::Context, phase::Phase, proposal::{
         on_receive_proposal
     }};
@@ -57,7 +57,7 @@ pub async fn on_recv_quit_view(v: View, cert: Certificate, cx: &mut Context) {
     // We may seen a few votes from different nodes, but we are not sure if all
     // of the votes in this are valid
     let (sign_data, block_hash) = match &cert.msg {
-        CertType::Vote(ref _v, ref h) => (util::io::to_bytes(&cert.msg),*h),
+        CertType::Vote(ref _v, ref h) => (util::io::to_bytes(&cert.msg),h.clone()),
         _ => panic!("Quit view code unreachable"),
     };
 
@@ -94,7 +94,7 @@ pub async fn on_recv_quit_view(v: View, cert: Certificate, cx: &mut Context) {
     // Update the last seen cert, if this is the first time we are observing this certificate
     let cert_arc = Arc::new(cert);
     if !cx.cert_map.contains_key(&block_hash) {
-        cx.cert_map.insert(block_hash, cert_arc.clone());
+        cx.cert_map.insert(block_hash.clone(), cert_arc.clone());
         cx.vote_map.remove(&block_hash);
     }
 
@@ -137,7 +137,7 @@ pub async fn on_vote(c: Certificate, mut p: Propose, cx: &mut Context) -> bool {
         Some(x) => x,
     };
     let (sign_data, blk_hash) = match &c.msg {
-        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), *d),
+        CertType::Vote(_v, d) => (util::io::to_bytes(&c.msg), d.clone()),
         _ => unreachable!("other vote types cant be here"),
     };
 

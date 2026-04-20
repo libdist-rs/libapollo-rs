@@ -1,11 +1,11 @@
 // A tool that builds config files for all the nodes and the clients for the
 // protocol.
 
-use crypto::{ed25519, secp256k1};
+use libcrypto::{ed25519, secp256k1};
 use config::{Node, Client};
 use clap::{load_yaml, App};
 use types::Replica;
-use crypto::Algorithm;
+use libcrypto::Algorithm;
 use std::error::Error;
 use util::io::*;
 use openssl::{asn1::Asn1Time, bn::{BigNum, MsbOption}, error::ErrorStack, hash::MessageDigest, pkey::{PKey, PKeyRef, Private}, rsa::Rsa, x509::{X509, X509NameBuilder, X509Ref, X509Req, X509ReqBuilder, extension::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName, SubjectKeyIdentifier}}};
@@ -201,15 +201,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         node[i].crypto_alg = t.clone();
         match t {
             Algorithm::ED25519 => {
-                let kp = ed25519::Keypair::generate();
-                pk.insert(i as Replica, kp.public().encode().to_vec());
-                node[i].secret_key_bytes = kp.encode().to_vec();
-
+                let kp = ed25519::Keypair::generate().expect("ed25519 keypair generation");
+                pk.insert(i as Replica, bincode::serialize(&kp.public()).expect("serialize pub"));
+                node[i].secret_key_bytes = bincode::serialize(&kp).expect("serialize kp");
             }
             Algorithm::SECP256K1 => {
                 let kp = secp256k1::Keypair::generate();
-                pk.insert(i as Replica, kp.public().encode().to_vec());
-                node[i].secret_key_bytes = kp.secret().to_bytes().to_vec();
+                pk.insert(i as Replica, bincode::serialize(kp.public()).expect("serialize pub"));
+                node[i].secret_key_bytes = bincode::serialize(&kp).expect("serialize kp");
             }
             _ => (),
         };
