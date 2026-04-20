@@ -73,3 +73,9 @@ args:
         help: the port the client listens on for node-pushed ClientMsg (single-client stress-test topology)
         takes_value: true
         required: true
+    - mempool_base_port:
+        short: M
+        long: mempool_base_port
+        help: base port p for the mempool peer-sync socket; node i binds p+i
+        takes_value: true
+        required: true

@@ -24,6 +24,12 @@ pub struct Node {
     /// Peer addresses for node-to-node (consensus) TLS.
     pub net_map: HashMap<Replica, String>,
 
+    /// Peer addresses for node-to-node mempool TCP. Mempool messages
+    /// (`MempoolMsg::RequestBatch` / `Batch`) go over plain TCP, which
+    /// matches libmempool-rs's `TcpSimpleSender` / `TcpReceiver`. Nodes
+    /// look entries up by peer `Replica` id to forward/request batches.
+    pub mempool_net_map: HashMap<Replica, String>,
+
     /// Addresses where each client listens for `ClientMsg` pushes. Nodes
     /// build a `TlsReliableSender<ClientId, ClientMsg>` over this map so
     /// commits can be streamed back to clients.
@@ -35,8 +41,15 @@ pub struct Node {
     pub num_nodes: usize,
     pub num_faults: usize,
     pub block_size:usize,
-    /// Address this node listens on for incoming client transactions.
+    /// Address this node listens on for incoming client transactions
+    /// (plain TCP -- libmempool-rs's `Mempool::spawn` binds a
+    /// `TcpReceiver<Transaction>` here).
     pub client_port: u16,
+    /// Address this node listens on for peer-to-peer mempool sync
+    /// traffic (`MempoolMsg::RequestBatch` / `MempoolMsg::Batch`). A
+    /// second plain-TCP port; separate from `client_port` so the
+    /// client endpoint is never hit by peer batch requests.
+    pub mempool_port: u16,
     pub payload: usize,
 
     /// Crypto primitives
@@ -95,6 +108,8 @@ impl Node {
         Node{
             block_size: 0,
             client_port: 0,
+            mempool_port: 0,
+            mempool_net_map: HashMap::default(),
             client_net_map: HashMap::default(),
             crypto_alg: Algorithm::ED25519,
             delta: 50,
@@ -182,5 +197,11 @@ impl Node {
     /// connections
     pub fn client_ip(&self) -> String {
         format!("0.0.0.0:{}", self.client_port)
+    }
+
+    /// Returns the bind address for this node's peer-to-peer mempool
+    /// socket (`MempoolMsg::RequestBatch` / `Batch` traffic).
+    pub fn mempool_ip(&self) -> String {
+        format!("0.0.0.0:{}", self.mempool_port)
     }
 }

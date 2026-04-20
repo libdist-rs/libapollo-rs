@@ -192,6 +192,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .expect("client_listen_port value not specified")
         .parse::<u16>()
         .expect("failed to parse client_listen_port into an integer");
+    let mempool_base_port:u16 = m.value_of("mempool_base_port")
+        .expect("mempool_base_port value not specified")
+        .parse::<u16>()
+        .expect("failed to parse mempool_base_port into an integer");
     let mut client = Client::new();
     client.block_size = blocksize;
     client.crypto_alg = t.clone();
@@ -202,6 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut pk = HashMap::default();
     let mut ip = HashMap::default();
+    let mut mempool_ip: HashMap<Replica, String> = HashMap::default();
 
     let (cert, privkey) = new_root_cert()?;
 
@@ -223,6 +228,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         node[i].payload = payload;
         node[i].client_port = client_base_port+(i as u16);
 
+        node[i].mempool_port = mempool_base_port + (i as u16);
+
         node[i].crypto_alg = t.clone();
         match t {
             Algorithm::ED25519 => {
@@ -237,10 +244,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             _ => (),
         };
-        ip.insert(i as Replica, 
+        ip.insert(i as Replica,
         format!("{}:{}", "127.0.0.1", base_port+(i as u16))
         );
-        client.net_map.insert(i as Replica, 
+        mempool_ip.insert(i as Replica,
+        format!("{}:{}", "127.0.0.1", mempool_base_port+(i as u16))
+        );
+        // The client submits transactions to each node's mempool
+        // (plain TCP), so net_map on the client side points at
+        // `client_base_port+i`, not the mempool peer port.
+        client.net_map.insert(i as Replica,
         format!("127.0.0.1:{}", client_base_port+(i as u16))
         );
 
@@ -286,6 +299,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for i in 0..num_nodes {
         node[i].pk_map = pk.clone();
         node[i].net_map = ip.clone();
+        node[i].mempool_net_map = mempool_ip.clone();
         node[i].client_net_map = client_net_map.clone();
     }
 
