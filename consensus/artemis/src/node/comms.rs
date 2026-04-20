@@ -1,52 +1,50 @@
-use tokio::task::JoinHandle;
 use types::artemis::{ClientMsg, ProtocolMsg, Replica};
 
 use super::context::Context;
-use futures::SinkExt;
 use std::sync::Arc;
 
-/// Communication logic
-/// Contains three functions
-/// - `Send` - Send a message to a specific node
-/// - `Multicast` - Send a message to all the peers
-
+/// Communication logic: send/multicast/multicast_client helpers that
+/// serialize and hand off to the underlying libnet-rs senders.
 impl Context {
-    /// Send a message to a specific peer
+    /// Send a `ProtocolMsg` to a specific peer.
     pub(crate) async fn send(&mut self, to: Replica, msg: Arc<ProtocolMsg>) {
         if to == self.myid() {
             return;
         }
-        self.net_send.send((to, msg)).await.unwrap();
+        let bytes = Self::serialize_proto(msg.as_ref());
+        match self.consensus_net.send(to, bytes).await {
+            Ok(h) => self.remember_consensus(h),
+            Err(e) => log::warn!("consensus send to {} failed: {:?}", to, e),
+        }
     }
 
-    /// Send a message concurrently (by launching a new task) to a specific peer
-    pub(crate) async fn c_send(&mut self, to:Replica, msg: Arc<ProtocolMsg>) -> JoinHandle<()> {
-        let mut send_copy = self.net_send.clone();
-        let myid = self.myid();
-        tokio::spawn(async move {
-            if to == myid {
-                return;
-            }
-            send_copy.send((to, msg)).await.unwrap()
-        })
-    }
-
-    /// Multicast (Sendall) message to all peers
+    /// Multicast (Sendall) to every peer but myself.
     pub(crate) async fn multicast(&mut self, msg: Arc<ProtocolMsg>) {
-        if let Err(e) = self.net_send.send((self.num_nodes() as Replica,
-            msg
-        )).await {
-            log::warn!(
-                "Server channel closed with error: {}", e);
-        };
+        let bytes = Self::serialize_proto(msg.as_ref());
+        let results = self
+            .consensus_net
+            .broadcast(&self.broadcast_peers, bytes)
+            .await;
+        for r in results {
+            match r {
+                Ok(h) => self.remember_consensus(h),
+                Err(e) => log::warn!("consensus broadcast leg failed: {:?}", e),
+            }
+        }
     }
 
-    /// Multicast (Sendall) message to all the clients
+    /// Multicast a `ClientMsg` to every registered client.
     pub(crate) async fn multicast_client(&mut self, msg: Arc<ClientMsg>) {
-        if let Err(e) = self.cli_send.send(msg)
-            .await {
-            log::warn!(
-                "Server channel closed with error: {}", e);
-        };
+        if self.all_clients.is_empty() {
+            return;
+        }
+        let bytes = bytes::Bytes::from(bincode::serialize(msg.as_ref()).expect("ClientMsg serialize"));
+        let results = self.client_net.broadcast(&self.all_clients, bytes).await;
+        for r in results {
+            match r {
+                Ok(h) => self.remember_client(h),
+                Err(e) => log::warn!("client broadcast leg failed: {:?}", e),
+            }
+        }
     }
 }

@@ -1,10 +1,8 @@
-use types::KeypairSign;
-use std::collections::HashSet;
 use super::context::Context;
-use libcrypto::hash::Hash;
-use types::synchs::{Block, CertType, Certificate, Transaction, Vote,
-        Propose, ProtocolMsg};
+use std::collections::HashSet;
 use std::sync::Arc;
+use types::synchs::{Block, CertType, Certificate, ProtocolMsg, Propose, Transaction, Vote};
+use types::KeypairSign;
 
 pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
     if new_block.hash != p.block_hash {
@@ -106,11 +104,9 @@ pub async fn on_new_valid_proposal(
     new_block: Arc<Block>,
     cx: &mut Context,
 ) -> bool {
-    let mut decision = false;
-
     if !cx.storage.is_delivered_by_hash(&new_block.header.prev) {
         log::warn!("We do not have the parent for this block");
-        return decision;
+        return false;
     }
 
     // Build our vote
@@ -120,41 +116,32 @@ pub async fn on_new_valid_proposal(
     match cx.my_secret_key.sign(&sign_data) {
         Err(e) => {
             panic!("Failed to sign a vote: {}", e);
-        },
+        }
         Ok(vo) => {
-            my_vote.votes.push(Vote { origin: cx.myid, auth: vo });
-        },
+            my_vote.votes.push(Vote {
+                origin: cx.myid,
+                auth: vo,
+            });
+        }
     };
 
-    decision = true;
-
-    let ship = cx.net_send.clone();
-    let ship_nodes = cx.num_nodes as types::Replica;
-    let ship_v = ProtocolMsg::VoteMsg(my_vote, p.as_ref().clone());
-    let vote_ship = tokio::spawn(async move {
-        let msg = Arc::new(ship_v);
-        if let Err(e) = ship.send((ship_nodes, msg)) {
-            log::warn!("failed to send vote: {}", e);
-        }
-    });
-
+    // State mutation first so that the vote broadcast sees the most
+    // recent height for its cancel-handler retention key.
     cx.storage.add_delivered_block(new_block.clone());
     cx.storage.clear(&new_block.body.tx_hashes);
     cx.height = new_block.header.height;
     cx.last_seen_block = new_block;
     cx.last_seen_cert = p.cert.clone();
 
-    if let Err(e) = vote_ship.await {
-        log::warn!("Failed to send vote to the others: {}", e);
-        return decision;
-    }
+    let vote_msg = ProtocolMsg::VoteMsg(my_vote, p.as_ref().clone());
+    cx.multicast(&vote_msg).await;
 
     log::debug!("Sent a vote to all the nodes");
-    decision
+    true
 }
 
 pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> (Arc<Propose>, Arc<Block>) {
-    let parent = &cx.last_seen_block;
+    let parent = cx.last_seen_block.clone();
     let mut new_block = Block::with_tx(txs);
 
     new_block.header.author = cx.myid;
@@ -174,7 +161,10 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> (Arc<Pr
         Err(e) => panic!("Failed to sign the new proposal: {}", e),
         Ok(sig) => sig,
     };
-    new_block_cert.votes.push(Vote { origin: cx.myid, auth: sig });
+    new_block_cert.votes.push(Vote {
+        origin: cx.myid,
+        auth: sig,
+    });
 
     let new_block_ref = Arc::new(new_block);
     let mut p = Propose::new();
@@ -186,16 +176,11 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> (Arc<Pr
     };
     p.view = cx.view;
 
-    let ship = cx.net_send.clone();
-    let ship_num = cx.num_nodes as types::Replica;
-    let ship_p = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone());
-    tokio::spawn(async move {
-        if let Err(e) = ship.send((ship_num, Arc::new(ship_p))) {
-            println!("Error broadcasting the block to all the nodes: {}", e);
-        }
-    });
-
     cx.storage.add_delivered_block(new_block_ref.clone());
+
+    // Broadcast the new proposal to peers.
+    let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone());
+    cx.multicast(&msg).await;
 
     (Arc::new(p), new_block_ref)
 }

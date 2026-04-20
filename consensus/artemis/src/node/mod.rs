@@ -30,6 +30,6 @@ pub use message::*;
 mod coordinator;
 pub use coordinator::*;
 
-/// Communication logic
+/// Communication logic. `impl Context` blocks here are invoked through
+/// `Context`, no items need to be re-exported.
 mod comms;
-pub use comms::*;

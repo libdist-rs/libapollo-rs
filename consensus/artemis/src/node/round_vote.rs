@@ -40,8 +40,9 @@ pub async fn do_round_vote(cx: &mut Context) {
         tail = libcrypto::hash::Hash::<Block>::try_from(b.blk.header.prev.as_ref())
             .expect("hash is exactly 32 bytes");
     }
-    let block_vec = block_vec.into_iter().map(|b|{
-        (b,Payload::empty())
+    let payload_size = cx.payload;
+    let block_vec = block_vec.into_iter().map(|b| {
+        (b, Payload::with_payload(payload_size))
     }).collect();
     let msg = Arc::new(ClientMsg::NewBlock(v.clone(), block_vec));
     cx.multicast_client(msg).await;
@@ -62,28 +63,23 @@ pub async fn try_receive_round_vote(cx:&mut Context, from: Replica, ucr_vote: UC
     if cx.round() < ucr_vote.round {
         // We got a ucr_vote from the future
         log::debug!("Got a vote for round {} from the future for {}", ucr_vote.round, cx.round());
-        // What TODO? Keep it ready until we move to this round
         if cx.storage.is_delivered_by_hash(&ucr_vote.hash.clone()) {
             cx.vote_ready.insert(ucr_vote.round, ucr_vote);
         } else {
             // I don't have the chain for this. Ask chain from the sender
             let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, ucr_vote.hash.clone()));
-            let job = cx.c_send(from, msg).await;
+            cx.send(from, msg).await;
             cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
-            job.await.unwrap();
         }
-        // cx.vote_ready.insert(ucr_vote.round, ucr_vote);
         return;
     }
 
-    // cx.future_votes.remove(&cx.round());
     // Do I have the chain?
     if !cx.storage.is_delivered_by_hash(&ucr_vote.hash.clone()) {
         // I don't have the chain for this. Ask chain from the sender
         let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, ucr_vote.hash.clone()));
-        let job = cx.c_send(from, msg).await;
+        cx.send(from, msg).await;
         cx.vote_waiting.insert(ucr_vote.hash.clone(), ucr_vote);
-        job.await.unwrap();
         return;
     }
 
@@ -105,27 +101,21 @@ pub async fn on_receive_round_vote(cx:&mut Context, ucr_vote: UCRVote) {
             return;
         }
     }
-    // The signature is correct by now
 
-    // Add this to our vote chain
     cx.vote_chain.insert(ucr_vote.round, Arc::new(ucr_vote.clone()));
 
-    // Trigger commit rule
     if cx.round() > cx.num_faults() {
         do_commit(cx);
     }
 
-    // Update the last voted block
     let last_voted_block = cx.storage.delivered_block_from_hash(&ucr_vote.hash.clone())
         .expect("Obtained a vote for an unknown hash");
     cx.last_voted_block = last_voted_block.clone();
-    
-    // Relay the vote
+
+    // Relay the vote to the next round leader.
     let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), ucr_vote));
-    let job = cx.c_send(cx.next_round_leader(), msg).await;
-    
-    // Update leaders, and round
+    cx.send(cx.next_round_leader(), msg).await;
+
     cx.update_round();
     log::debug!("Going to the next round  {}", cx.round());
-    job.await.unwrap();
 }

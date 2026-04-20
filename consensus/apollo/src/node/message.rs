@@ -1,7 +1,6 @@
 use types::apollo::{Block, Propose, ProtocolMsg, Replica};
 use super::*;
 use std::sync::Arc;
-use futures::SinkExt;
 
 pub async fn process_message(cx:&mut Context)
 {
@@ -79,7 +78,7 @@ pub async fn delivery_check(
                 log::debug!("Block unknown: {:?}", p.block_hash);
                 let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, p.block_hash.clone()));
                 cx.prop_waiting.insert(p.block_hash.clone(), p);
-                cx.net_send.send((sender, msg)).await.unwrap();
+                cx.send(sender, msg).await;
                 return;
             }
         }
@@ -90,7 +89,7 @@ pub async fn delivery_check(
         let msg = Arc::new(ProtocolMsg::Request(cx.myid(), cx.req_ctr, parent_hash.clone()));
         cx.storage.add_delivered_block(block_arc);
         cx.prop_waiting_parent.insert(parent_hash, p);
-        cx.net_send.send((sender, msg)).await.unwrap();
+        cx.send(sender, msg).await;
         return;
     }
 

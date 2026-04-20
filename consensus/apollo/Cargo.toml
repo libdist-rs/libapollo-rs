@@ -12,7 +12,6 @@ consensus = { package = "consensus", path="../"}
 types = { package = "types", path="../../types"}
 libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs", tag = "v0.3.2" }
 bincode = "1"
-net = { package = "net", path="../../net"}
 util = { package = "util", path="../../util"}
 tokio = { version = "1.0", features = ["full"] }
 futures = "^0.3"
@@ -23,3 +22,8 @@ serde = "1.0.70"
 log="*"
 priority-queue="1"
 fnv = "1"
+
+# libnet-rs: direct TLS reliable-sender / receiver integration
+net-common = { package = "common", path = "/Users/hermitsage/Github/libnet-rs/common", features = ["tls"] }
+tls-reliable-sender = { path = "/Users/hermitsage/Github/libnet-rs/tls-reliable-sender" }
+tls-receiver = { path = "/Users/hermitsage/Github/libnet-rs/tls-receiver" }

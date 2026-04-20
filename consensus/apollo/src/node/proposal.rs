@@ -83,8 +83,10 @@ pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Co
         }
     }
 
+    // Relay to the next leader before doing any heavy local work so the
+    // chain keeps moving even if our commit path is slow.
     let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), (*p).clone()));
-    let job = cx.c_send(cx.next_leader(), msg).await;
+    cx.send(cx.next_leader(), msg).await;
 
     cx.storage.clear(&block.body.tx_hashes);
     cx.prop_chain_by_hash.insert(p.block_hash.clone(), p.clone());
@@ -96,6 +98,4 @@ pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Co
 
     cx.last_seen_block = block;
     cx.update_round();
-
-    job.await.expect("Concurrent relaying failed");
 }

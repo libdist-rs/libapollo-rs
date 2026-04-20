@@ -10,7 +10,6 @@ edition = "2018"
 config = { package = "config", path="../../../config"}
 consensus = { package = "consensus", path="../../../consensus"}
 synchs = { package = "synchs", path="../../../consensus/synchs"}
-net = { package = "net", path="../../../net"}
 util = { package = "util", path="../../../util"}
 types = { package = "types", path="../../../types"}
 clap = {version = "2", features = ["yaml"]}

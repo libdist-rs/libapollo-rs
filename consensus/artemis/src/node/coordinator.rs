@@ -1,6 +1,5 @@
 use std::convert::TryFrom;
 use libcrypto::hash::Hash;
-use types::KeypairSign;
 use types::{BlockTrait, artemis::{Block, ProtocolMsg, Transaction}};
 use super::context::Context;
 use std::sync::Arc;

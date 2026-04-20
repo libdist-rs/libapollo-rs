@@ -15,20 +15,11 @@ pub async fn on_commit(p: Arc<Propose>, cx: &mut Context) {
     if cx.storage.is_committed_by_hash(&b.hash) {
         return;
     }
-
-    let ship = cx.cli_send.clone();
-    let payload = cx.payload;
-    let ship_b = b.clone();
-    let ship_block = tokio::spawn(async move {
-        let payload = Payload::with_payload(payload);
-        let msg = ClientMsg::NewBlock(ship_b.as_ref().clone(), payload);
-        log::debug!("sending msg: {:?} to the client", msg);
-        if let Err(e) = ship.send(Arc::new(msg)) {
-            println!("Error sending the block to the client: {}", e);
-        }
-        log::debug!("Committed block and sending it to the client now");
-    });
     cx.last_committed_block_ht = b.header.height;
     cx.storage.add_committed_block(b.clone());
-    ship_block.await.unwrap();
+
+    let payload = Payload::with_payload(cx.payload);
+    let msg = ClientMsg::NewBlock(b.as_ref().clone(), payload);
+    cx.multicast_client(&msg).await;
+    cx.gc_handlers();
 }

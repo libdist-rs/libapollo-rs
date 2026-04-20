@@ -1,14 +1,20 @@
-// use futures::prelude::*;
 use clap::{load_yaml, App};
-use config::Node;
-use types::artemis::{ClientMsg, ProtocolMsg, Transaction};
+use config::{ClientId, Node};
+use fnv::FnvHashMap;
+use net_common::{CertSource, TlsOptions};
 use std::error::Error;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use tls_receiver::TlsReceiver;
+use tls_reliable_sender::TlsReliableSender;
+use types::artemis::{ClientMsg, ProtocolMsg, Replica, Transaction};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let yaml = load_yaml!("cli.yml");
     let m = App::from_yaml(yaml).get_matches();
 
-    let conf_str = m.value_of("config")
+    let conf_str = m
+        .value_of("config")
         .expect("unable to convert config file into a string");
     let conf_file = std::path::Path::new(conf_str);
     let str = String::from(conf_str);
@@ -16,7 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .extension()
         .expect("Unable to get file extension")
         .to_str()
-        .expect("Failed to convert the extension into ascii string") 
+        .expect("Failed to convert the extension into ascii string")
     {
         "json" => Node::from_json(str),
         "dat" => Node::from_bin(str),
@@ -45,10 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.update_config(util::io::file_to_ips(f.to_string()));
     }
     let config = config;
-    let mut is_client_apollo_enabled = false;
-    if m.is_present("special_client") {
-        is_client_apollo_enabled = true;
-    } 
+    let is_client_apollo_enabled = m.is_present("special_client");
 
     simple_logger::SimpleLogger::new().init().unwrap();
     let x = m.occurrences_of("debug");
@@ -59,59 +62,77 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     log::info!("Successfully decoded the config file");
-
-    let cli_net_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    
-    // Setup client network
-    let cli_network = net::futures_manager::Protocol::<Transaction, ClientMsg>::new(config.id, config.num_nodes as types::Replica, &config.root_cert_path, &config.my_cert_path, &config.my_cert_key_path);
-    let (cli_send, cli_recv) = 
-    cli_net_rt.block_on(
-        cli_network.client_setup(
-            config.client_ip(),
-            util::codec::EnCodec::new(),
-            util::codec::Decodec::new(),
-        )
-    );
-
-    let prot_net_rt = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .unwrap();
-
-    // Setup networking
-    let protocol_network = net::futures_manager::Protocol::<ProtocolMsg, ProtocolMsg>::new(config.id, config.num_nodes as types::Replica, &config.root_cert_path, &config.my_cert_path, &config.my_cert_key_path);
-
-    // Setup the protocol network
-    let (net_send, net_recv) = 
-    prot_net_rt.block_on(
-        protocol_network.server_setup(
-            config.net_map.clone(), 
-            util::codec::EnCodec::new(), 
-            util::codec::Decodec::new()
-        )
-    );
-
-    let core_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(2)
-        .build()
-        .unwrap();
-    
     log::info!("Using special artemis client: {}", is_client_apollo_enabled);
-    // Start the Apollo consensus protocol
-    core_rt.block_on(
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async move {
+        let tls = || TlsOptions {
+            cert_source: CertSource::PemFiles {
+                cert_chain: PathBuf::from(&config.my_cert_path),
+                private_key: PathBuf::from(&config.my_cert_key_path),
+            },
+            ..TlsOptions::high_throughput()
+        };
+
+        let consensus_listen: SocketAddr = config
+            .my_ip()
+            .parse()
+            .expect("failed to parse consensus listen addr");
+        let consensus_recv = TlsReceiver::<ProtocolMsg>::spawn_with_options(consensus_listen, tls());
+
+        let mut peer_map: FnvHashMap<Replica, SocketAddr> = FnvHashMap::default();
+        for (&id, addr) in &config.net_map {
+            if id == config.id {
+                continue;
+            }
+            peer_map.insert(
+                id,
+                addr.parse()
+                    .unwrap_or_else(|_| panic!("invalid peer addr for {}: {}", id, addr)),
+            );
+        }
+        let consensus_net = TlsReliableSender::<Replica, ProtocolMsg>::with_peers_and_options(
+            peer_map,
+            tls(),
+        )
+        .expect("consensus sender setup");
+
+        let client_listen: SocketAddr = config
+            .client_ip()
+            .parse()
+            .expect("failed to parse client-facing listen addr");
+        let tx_recv = TlsReceiver::<Transaction>::spawn_with_options(client_listen, tls());
+
+        let mut client_map: FnvHashMap<ClientId, SocketAddr> = FnvHashMap::default();
+        for (&id, addr) in &config.client_net_map {
+            client_map.insert(
+                id,
+                addr.parse()
+                    .unwrap_or_else(|_| panic!("invalid client addr for {}: {}", id, addr)),
+            );
+        }
+        let client_net = TlsReliableSender::<ClientId, ClientMsg>::with_peers_and_options(
+            client_map,
+            tls(),
+        )
+        .expect("client sender setup");
+
+        let sleep_time = unsafe { config::SLEEP_TIME };
+        tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
+
         artemis::node::reactor(
             &config,
             is_client_apollo_enabled,
-            net_send,
-            net_recv,
-            cli_send,
-            cli_recv
+            consensus_net,
+            consensus_recv,
+            client_net,
+            tx_recv,
         )
-    );
+        .await;
+    });
     Ok(())
 }
-

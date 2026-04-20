@@ -12,9 +12,13 @@ consensus = { package = "consensus", path="../../../consensus"}
 optsync = { package = "optsync", path="../../../consensus/optsync"}
 util = { package = "util", path="../../../util"}
 types = { package = "types", path="../../../types"}
-net = { package = "net", path="../../../net"}
 clap = {version = "2", features = ["yaml"]}
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3.8"
+fnv = "1"
 log="*"
 simple_logger="*"
+
+net-common = { package = "common", path = "/Users/hermitsage/Github/libnet-rs/common", features = ["tls"] }
+tls-reliable-sender = { path = "/Users/hermitsage/Github/libnet-rs/tls-reliable-sender" }
+tls-receiver = { path = "/Users/hermitsage/Github/libnet-rs/tls-receiver" }

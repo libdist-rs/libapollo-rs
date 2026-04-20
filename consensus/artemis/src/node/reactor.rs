@@ -1,95 +1,65 @@
 /// The core consensus module used for Artemis
-/// 
+///
 /// The reactor reacts to all the messages from the network, and talks to the
 /// clients accordingly.
-
-use futures::channel::mpsc::unbounded as unbounded_channel;
-use futures::{StreamExt, SinkExt};
-use types::artemis::{ClientMsg, Payload};
-use config::Node;
-use super::{
-    context::Context, 
-    buffer_message, 
-    process_message, 
-    do_new_block,
-};
-use std::sync::Arc;
-use crate::{NetSend,NetRecv,ClientSend,ClientRecv, node::round_vote::try_round_vote};
+use super::{buffer_message, context::Context, do_new_block, process_message};
+use crate::node::round_vote::try_round_vote;
+use config::{ClientId, Node};
+use futures::future::FutureExt;
+use tls_receiver::TlsReceiver;
+use tls_reliable_sender::TlsReliableSender;
+use tokio_stream::StreamExt;
+use types::artemis::{ClientMsg, ProtocolMsg, Replica, Transaction};
 
 pub async fn reactor(
-    config:&Node,
+    config: &Node,
     is_client_apollo_enabled: bool,
-    net_send: NetSend,
-    mut net_recv: NetRecv,
-    cli_send: ClientSend,
-    mut cli_recv: ClientRecv,
+    consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
+    mut consensus_recv: TlsReceiver<ProtocolMsg>,
+    client_net: TlsReliableSender<ClientId, ClientMsg>,
+    mut tx_recv: TlsReceiver<Transaction>,
 ) {
-    // Optimization to improve latency when the payloads are high
-    let (send, mut recv) = unbounded_channel();
-
-    let mut cx = Context::new(config, net_send, send, is_client_apollo_enabled);
+    let mut cx = Context::new(config, consensus_net, client_net, is_client_apollo_enabled);
     let block_size = config.block_size;
     let myid = config.id;
-    let pl_size = config.payload*config.block_size;
-    let cli_send_p = cli_send;
 
-    let payload_adder = async move {
-        let mut cli_send = cli_send_p;
-        loop {
-            let msg_arc = recv.next().await.unwrap().as_ref().clone();
-            let msg = match msg_arc {
-                ClientMsg::NewBlock(v, block_vec) => {
-                    let block_vec = block_vec.into_iter().map(|(b, _pl)| {
-                        let payload = Payload::with_payload(pl_size);
-                        (b, payload)
-                    }).collect();
-                    ClientMsg::NewBlock(v, block_vec)
-                },
-                _ => continue,
-            };
-            cli_send.send(Arc::new(msg)).await.unwrap();
-        };
-    };
-    #[cfg(feature="parallel")]
-    let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-    #[cfg(not(feature="parallel"))]
-    let rt = tokio::runtime::Handle::current();
-    rt.spawn(payload_adder);
     loop {
         tokio::select! {
-            // Received a protocol message
-            pmsg_opt = net_recv.next() => {
-                if let None = pmsg_opt {
-                    log::error!(
-                        "Protocol message channel closed");
-                    std::process::exit(0);
-                }
-                let (_, pmsg) = pmsg_opt.unwrap();
-                // So basically, we extract all currently available messages and then replay them in order
+            pmsg_opt = consensus_recv.next() => {
+                let pmsg = match pmsg_opt {
+                    None => {
+                        log::error!("Protocol message channel closed");
+                        std::process::exit(0);
+                    }
+                    Some(Err(e)) => {
+                        log::warn!("Dropping undecodable protocol message: {}", e);
+                        continue;
+                    }
+                    Some(Ok(x)) => x,
+                };
                 buffer_message(pmsg, &mut cx);
-                while let Ok(Some((_, pmsg))) = net_recv.try_next() {
+                while let Some(Ok(pmsg)) = consensus_recv.next().now_or_never().flatten() {
                     buffer_message(pmsg, &mut cx);
                 }
                 process_message(&mut cx).await;
             },
-            // Received a client message
-            tx_opt = cli_recv.next() => {
-                // We received a message from the client
+            tx_opt = tx_recv.next() => {
                 match tx_opt {
                     None => break,
-                    Some(tx) => cx.storage.add_transaction(tx),
+                    Some(Err(e)) => {
+                        log::warn!("Dropping undecodable transaction: {}", e);
+                        continue;
+                    }
+                    Some(Ok(tx)) => cx.storage.add_transaction(tx),
                 }
             }
         }
         // Do we have sufficient commands, and are we the view leader?
-        if cx.storage.get_tx_pool_size() >= block_size && 
-            cx.view_leader == myid 
-        {
+        if cx.storage.get_tx_pool_size() >= block_size && cx.view_leader == myid {
             log::debug!(
-                "I {} am the view leader and, I am proposing a block", cx.myid());
+                "I {} am the view leader and, I am proposing a block",
+                cx.myid()
+            );
             let txs = cx.storage.cleave(block_size);
             do_new_block(txs, &mut cx).await;
         }

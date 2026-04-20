@@ -26,6 +26,7 @@ pub use message::*;
 mod blame;
 pub use blame::*;
 
-// Communication logic
+// Communication logic. `impl Context` blocks here are called through
+// `Context`, so the module only needs to be referenced for its
+// side-effect of adding those methods to Context's API surface.
 mod comms;
-pub use comms::*;
