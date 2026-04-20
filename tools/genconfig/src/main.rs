@@ -7,9 +7,19 @@ use clap::{load_yaml, App};
 use types::Replica;
 use libcrypto::Algorithm;
 use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
 use util::io::*;
 use openssl::{asn1::Asn1Time, bn::{BigNum, MsbOption}, error::ErrorStack, hash::MessageDigest, pkey::{PKey, PKeyRef, Private}, rsa::Rsa, x509::{X509, X509NameBuilder, X509Ref, X509Req, X509ReqBuilder, extension::{AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName, SubjectKeyIdentifier}}};
 use fnv::FnvHashMap as HashMap;
+
+/// Write `bytes` to `{target}/{name}` and return the absolute path as a String.
+fn write_cert_file(target_dir: &Path, name: &str, bytes: &[u8]) -> Result<String, Box<dyn Error>> {
+    let path: PathBuf = target_dir.join(name);
+    fs::write(&path, bytes)?;
+    let abs = fs::canonicalize(&path)?;
+    Ok(abs.to_string_lossy().into_owned())
+}
 
 fn new_root_cert() -> Result<(X509, PKey<Private>), ErrorStack> {
     let rsa = Rsa::generate(2048)?;
@@ -187,6 +197,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (cert, privkey) = new_root_cert()?;
 
+    // Write the root cert once; every node and the client references the
+    // same path.
+    let target_path = Path::new(target);
+    fs::create_dir_all(target_path)?;
+    let root_cert_pem = cert.to_pem()?;
+    let root_cert_path = write_cert_file(target_path, "root-cert.pem", &root_cert_pem)?;
+
     for i in 0..num_nodes {
         node.push(Node::new());
 
@@ -221,12 +238,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let (new_cert, new_pkey) = get_signed_cert(&cert, &privkey)?;
 
-        node[i].root_cert = cert.to_der()?;
-        node[i].my_cert = new_cert.to_der()?;
-        node[i].my_cert_key = new_pkey.private_key_to_der()?;
+        let node_cert_pem = new_cert.to_pem()?;
+        let node_key_pem = new_pkey.private_key_to_pem_pkcs8()?;
+        node[i].root_cert_path = root_cert_path.clone();
+        node[i].my_cert_path = write_cert_file(target_path, &format!("node-{}.cert.pem", i), &node_cert_pem)?;
+        node[i].my_cert_key_path = write_cert_file(target_path, &format!("node-{}.key.pem", i), &node_key_pem)?;
     }
 
-    client.root_cert = cert.to_der()?;
+    client.root_cert_path = root_cert_path;
 
     for i in 0..num_nodes {
         node[i].pk_map = pk.clone();

@@ -15,7 +15,7 @@ pub async fn start(
     metric: u64,
     window: usize,
 ) {
-    let mut client_network = TlsClient::<ClientMsg, Transaction>::new(c.root_cert.clone());
+    let mut client_network = TlsClient::<ClientMsg, Transaction>::new(&c.root_cert_path);
     let servers = c.net_map.clone();
     let send_id = c.num_nodes as types::Replica;
     let (mut net_send,mut net_recv) = 

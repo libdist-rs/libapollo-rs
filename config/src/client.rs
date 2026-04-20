@@ -25,8 +25,8 @@ pub struct Client {
     pub block_size:usize,
     pub payload:usize,
 
-    // Root certificate
-    pub root_cert: Vec<u8>,
+    // Root certificate (absolute path to the PEM file written by genconfig)
+    pub root_cert_path: String,
 }
 
 impl Client {
@@ -69,9 +69,9 @@ impl Client {
             num_nodes:0,
             server_pk: HashMap::default(),
             payload:0,
-            root_cert:Vec::new(),
+            root_cert_path: String::new(),
         }
-    } 
+    }
 
     pub fn from_json(filename:String) -> Client {
         let f = File::open(filename)

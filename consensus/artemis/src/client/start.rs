@@ -39,7 +39,7 @@ pub async fn start(
     window: usize,
 ) {
     // Create the client network
-    let mut client_network = TlsClient::<ClientMsg, Transaction>::new(c.root_cert.clone());
+    let mut client_network = TlsClient::<ClientMsg, Transaction>::new(&c.root_cert_path);
 
     // Create the client network
     let servers = c.net_map.clone();

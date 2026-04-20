@@ -33,10 +33,12 @@ pub struct Node {
     pub pk_map: HashMap<Replica, Vec<u8>>,
     pub secret_key_bytes: Vec<u8>,
 
-    /// OpenSSL Certificate Details
-    pub my_cert: Vec<u8>,
-    pub my_cert_key: Vec<u8>,
-    pub root_cert: Vec<u8>,
+    /// TLS certificate paths (PEM). Absolute paths written by
+    /// `genconfig`; consumers pass them to the net layer, which loads
+    /// and parses the files at startup.
+    pub my_cert_path: String,
+    pub my_cert_key_path: String,
+    pub root_cert_path: String,
 }
 
 impl Node {
@@ -90,9 +92,9 @@ impl Node {
             pk_map: HashMap::default(),
             secret_key_bytes: Vec::new(),
             payload: 0,
-            my_cert: Vec::new(),
-            root_cert:Vec::new(),
-            my_cert_key: Vec::new(),
+            my_cert_path: String::new(),
+            root_cert_path: String::new(),
+            my_cert_key_path: String::new(),
         }
     }
 
