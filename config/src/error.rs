@@ -5,7 +5,7 @@ pub enum ParseError {
     // f, n
     IncorrectFaults(usize, usize),
     // r
-    InvalidMapEntry(usize),
+    InvalidMapEntry(types::Replica),
     // pk_size
     InvalidPkSize(usize),
     // sk_size

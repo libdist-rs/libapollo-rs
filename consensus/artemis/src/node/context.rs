@@ -114,7 +114,7 @@ impl Context {
             cli_send,
             storage: Storage::new(EXTRA_SPACE*config.block_size),
             view_leader: 0,
-            round_leader:config.num_faults-1,
+            round_leader:(config.num_faults-1) as Replica,
             last_f_leaders: LinkedHashMap::with_capacity(config.num_nodes),
             eligible_leaders: Vec::with_capacity(config.num_nodes),
             view:0,
@@ -155,10 +155,10 @@ impl Context {
         );
         // Initialize the leaders
         for i in 0..config.num_faults {
-            c.last_f_leaders.insert(i, ());
+            c.last_f_leaders.insert(i as Replica, ());
         }
         for i in config.num_faults..config.num_nodes {
-            c.eligible_leaders.push(i);
+            c.eligible_leaders.push(i as Replica);
         }
         log::info!("Using last f leaders: {:?}", c.last_f_leaders);
         log::info!("Using eligible leaders: {:?}", c.eligible_leaders);
@@ -211,7 +211,7 @@ impl Context {
 
     /// Returns the ID of this node
     #[inline]
-    pub const fn myid(&self) -> usize {
+    pub const fn myid(&self) -> Replica {
         self.myid
     }
 

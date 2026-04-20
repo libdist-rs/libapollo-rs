@@ -131,7 +131,7 @@ pub async fn on_new_valid_proposal(
     decision = true;
 
     let ship = cx.net_send.clone();
-    let ship_nodes = cx.num_nodes;
+    let ship_nodes = cx.num_nodes as types::Replica;
     let ship_v = ProtocolMsg::VoteMsg(my_vote, p.as_ref().clone());
     let vote_ship = tokio::spawn(async move {
         let msg = Arc::new(ship_v);
@@ -189,7 +189,7 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
     p.view = cx.view;
 
     let ship = cx.net_send.clone();
-    let ship_num = cx.num_nodes;
+    let ship_num = cx.num_nodes as types::Replica;
     let ship_p = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone());
     let broadcast = tokio::spawn(async move {
         if let Err(e) = ship.send((ship_num, Arc::new(ship_p))) {

@@ -33,7 +33,7 @@ impl Context {
 
     /// Multicast (Sendall) message to all peers
     pub(crate) async fn multicast(&mut self, msg: Arc<ProtocolMsg>) {
-        if let Err(e) = self.net_send.send((self.num_nodes(), 
+        if let Err(e) = self.net_send.send((self.num_nodes() as Replica,
             msg
         )).await {
             log::warn!(

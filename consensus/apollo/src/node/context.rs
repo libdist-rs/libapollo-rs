@@ -137,7 +137,7 @@ impl Context {
     }
 
     #[inline]
-    pub(crate) fn round(&self) -> Replica {
+    pub(crate) fn round(&self) -> Round {
         self.round
     }
 
@@ -161,10 +161,10 @@ impl Context {
     }
 
     pub(crate) fn next_of(&self, prev: Replica) -> Replica {
-        if prev+1 == self.num_nodes {
-            0 as Replica
+        if (prev as usize) + 1 == self.num_nodes {
+            0
         } else {
-            prev+1
+            prev + 1
         }
     }
 }

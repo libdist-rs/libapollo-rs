@@ -45,7 +45,7 @@ impl Context {
             storage: Storage::new(100_000),
             round: 1,
             prop_chain:HashMap::default(),
-            round_leader:config.num_faults-1,
+            round_leader:(config.num_faults-1) as Replica,
             future_msgs: HashMap::default(),
             last_f_leaders: LinkedHashMap::with_capacity(config.num_nodes),
             eligible_leaders: Vec::with_capacity(config.num_nodes),
@@ -54,10 +54,10 @@ impl Context {
         cx.storage.add_delivered_block(genesis_arc);
          // Initialize the leaders
         for i in 0..cx.config.num_faults {
-            cx.last_f_leaders.insert(i, ());
+            cx.last_f_leaders.insert(i as Replica, ());
         }
         for i in cx.config.num_faults..cx.config.num_nodes {
-            cx.eligible_leaders.push(i);
+            cx.eligible_leaders.push(i as Replica);
         }
         cx
     }

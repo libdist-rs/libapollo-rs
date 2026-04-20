@@ -1,2 +1,2 @@
-pub type Replica = usize;
+pub type Replica = u16;
 pub type Height = usize;

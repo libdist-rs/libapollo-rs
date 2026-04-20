@@ -56,7 +56,7 @@ pub async fn start(
 ) {
     let mut client_network = NClient::<ClientMsg, Transaction>::new(c.root_cert.clone());
     let servers = c.net_map.clone();
-    let send_id = c.num_nodes;
+    let send_id = c.num_nodes as types::Replica;
     let (mut net_send, mut net_recv) = 
         client_network.setup(servers, EnCodec::new(), Decodec::<ClientMsg>::new()).await;
 
