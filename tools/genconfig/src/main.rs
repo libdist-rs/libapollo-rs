@@ -132,9 +132,13 @@ fn get_signed_cert(
         .build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
     cert_builder.append_extension(auth_key_identifier)?;
 
+    // SANs cover the SNI values libnet-rs derives at connect time: loopback
+    // addresses resolve to "localhost", non-loopback IPs pass through as IP
+    // SANs. Keep "nodes.com" so legacy-client code paths still verify.
     let subject_alt_name = SubjectAlternativeName::new()
-    //     .dns("*.example.com")
+        .dns("localhost")
         .dns("nodes.com")
+        .ip("127.0.0.1")
         .build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
     cert_builder.append_extension(subject_alt_name)?;
 
@@ -184,6 +188,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or("0")
         .parse()
         .unwrap();
+    let client_listen_port:u16 = m.value_of("client_listen_port")
+        .expect("client_listen_port value not specified")
+        .parse::<u16>()
+        .expect("failed to parse client_listen_port into an integer");
     let mut client = Client::new();
     client.block_size = blocksize;
     client.crypto_alg = t.clone();
@@ -238,18 +246,47 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let (new_cert, new_pkey) = get_signed_cert(&cert, &privkey)?;
 
-        let node_cert_pem = new_cert.to_pem()?;
+        // Write a chain PEM containing `[leaf, root CA]` in that order.
+        // libnet-rs uses this file for both the server identity and the
+        // client trust store -- having the root CA inline lets peers
+        // (which libnet-rs verifies against our trust store) validate
+        // cleanly, while presenting `[leaf, root]` is a standard TLS
+        // server chain for self-signed roots. The vendored net reads
+        // the chain as the server identity and resolves trust from its
+        // own `root_cert_path`, so both code paths stay happy.
+        let mut chain_pem = new_cert.to_pem()?;
+        chain_pem.extend_from_slice(&root_cert_pem);
         let node_key_pem = new_pkey.private_key_to_pem_pkcs8()?;
         node[i].root_cert_path = root_cert_path.clone();
-        node[i].my_cert_path = write_cert_file(target_path, &format!("node-{}.cert.pem", i), &node_cert_pem)?;
+        node[i].my_cert_path = write_cert_file(target_path, &format!("node-{}.chain.pem", i), &chain_pem)?;
         node[i].my_cert_key_path = write_cert_file(target_path, &format!("node-{}.key.pem", i), &node_key_pem)?;
     }
 
+    // Generate one client identity for the stress-test topology. Its
+    // address is registered in every node's `client_net_map` so nodes
+    // can push committed `ClientMsg` back.
+    let client_id: u16 = 0;
+    let client_addr = format!("127.0.0.1:{}", client_listen_port);
+    let (client_cert, client_pkey) = get_signed_cert(&cert, &privkey)?;
+    let mut client_chain_pem = client_cert.to_pem()?;
+    client_chain_pem.extend_from_slice(&root_cert_pem);
+    let client_key_pem = client_pkey.private_key_to_pem_pkcs8()?;
+    let client_cert_path = write_cert_file(target_path, "client-0.chain.pem", &client_chain_pem)?;
+    let client_key_path = write_cert_file(target_path, "client-0.key.pem", &client_key_pem)?;
+
+    let mut client_net_map: HashMap<u16, String> = HashMap::default();
+    client_net_map.insert(client_id, client_addr.clone());
+
+    client.my_id = client_id;
+    client.my_listen_addr = client_addr;
+    client.my_cert_path = client_cert_path;
+    client.my_cert_key_path = client_key_path;
     client.root_cert_path = root_cert_path;
 
     for i in 0..num_nodes {
         node[i].pk_map = pk.clone();
         node[i].net_map = ip.clone();
+        node[i].client_net_map = client_net_map.clone();
     }
 
     client.server_pk = pk;

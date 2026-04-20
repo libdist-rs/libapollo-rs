@@ -106,17 +106,23 @@ impl Harness {
         })
     }
 
-    // Allocate a non-overlapping port block per run: 200 ports each, starting
-    // high enough that we don't collide with typical dev services.
-    fn alloc_ports(&mut self) -> (u16, u16) {
+    // Allocate a non-overlapping port block per run: 200 ports each,
+    // starting high enough that we don't collide with typical dev
+    // services. Layout inside a run's block:
+    //   base..base+n          node-to-node consensus
+    //   cli_base..cli_base+n  nodes' client-facing listeners
+    //   client_listen         the single stress client's listener for
+    //                         node-pushed ClientMsg
+    fn alloc_ports(&mut self) -> (u16, u16, u16) {
         let base = 21000 + self.run_idx * 200;
         let cli_base = base + 100;
+        let client_listen = cli_base + 50;
         self.run_idx += 1;
-        (base, cli_base)
+        (base, cli_base, client_listen)
     }
 
     async fn run(&mut self, cfg: &BenchConfig) -> Result<BenchResult, BoxErr> {
-        let (base_port, cli_base_port) = self.alloc_ports();
+        let (base_port, cli_base_port, client_listen_port) = self.alloc_ports();
         let run_dir = self.runs_dir.join(format!(
             "{}-n{}-b{}-p{}-{}",
             cfg.protocol.short(),
@@ -130,7 +136,7 @@ impl Harness {
         }
         fs::create_dir_all(&run_dir)?;
 
-        genconfig(&self.repo_root, &run_dir, cfg, base_port, cli_base_port).await?;
+        genconfig(&self.repo_root, &run_dir, cfg, base_port, cli_base_port, client_listen_port).await?;
         write_ip_files(&run_dir, cfg.num_nodes, base_port, cli_base_port)?;
 
         let bootstrap = Protocol::bootstrap_secs(cfg.num_nodes);
@@ -166,6 +172,7 @@ async fn genconfig(
     cfg: &BenchConfig,
     base_port: u16,
     cli_base_port: u16,
+    client_listen_port: u16,
 ) -> Result<(), BoxErr> {
     let bin = repo_root.join("target/release/genconfig");
     let out = Command::new(&bin)
@@ -181,6 +188,8 @@ async fn genconfig(
         .arg(base_port.to_string())
         .arg("--client_base_port")
         .arg(cli_base_port.to_string())
+        .arg("--client_listen_port")
+        .arg(client_listen_port.to_string())
         .arg("--payload")
         .arg(cfg.payload.to_string())
         .arg("--target")

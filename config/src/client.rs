@@ -1,11 +1,12 @@
 use serde::{
-    Serialize, 
+    Serialize,
     Deserialize
 };
 use types::Replica;
 use libcrypto::Algorithm;
 use fnv::FnvHashMap as HashMap;
 use super::{
+    ClientId,
     ParseError,
     is_valid_replica
 };
@@ -25,7 +26,16 @@ pub struct Client {
     pub block_size:usize,
     pub payload:usize,
 
-    // Root certificate (absolute path to the PEM file written by genconfig)
+    /// This client's identity and listen address. Nodes look up the
+    /// address in their `client_net_map[my_id]` when pushing `ClientMsg`,
+    /// so it must match on both sides of the config.
+    pub my_id: ClientId,
+    pub my_listen_addr: String,
+
+    /// TLS cert paths. Chain holds `[leaf, root CA]`, same convention as
+    /// `Node::my_cert_path`.
+    pub my_cert_path: String,
+    pub my_cert_key_path: String,
     pub root_cert_path: String,
 }
 
@@ -69,6 +79,10 @@ impl Client {
             num_nodes:0,
             server_pk: HashMap::default(),
             payload:0,
+            my_id: 0,
+            my_listen_addr: String::new(),
+            my_cert_path: String::new(),
+            my_cert_key_path: String::new(),
             root_cert_path: String::new(),
         }
     }

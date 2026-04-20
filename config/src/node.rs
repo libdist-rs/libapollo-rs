@@ -14,10 +14,20 @@ use std::io::prelude::*;
 use serde_json::from_reader;
 use toml::from_str;
 
+/// A short type alias used only in this crate -- clients are a
+/// different replica family from consensus replicas, so we distinguish
+/// them by using a dedicated id type.
+pub type ClientId = u16;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Node {
-    /// Node network config
+    /// Peer addresses for node-to-node (consensus) TLS.
     pub net_map: HashMap<Replica, String>,
+
+    /// Addresses where each client listens for `ClientMsg` pushes. Nodes
+    /// build a `TlsReliableSender<ClientId, ClientMsg>` over this map so
+    /// commits can be streamed back to clients.
+    pub client_net_map: HashMap<ClientId, String>,
 
     /// Protocol details
     pub delta: u64,
@@ -25,17 +35,19 @@ pub struct Node {
     pub num_nodes: usize,
     pub num_faults: usize,
     pub block_size:usize,
+    /// Address this node listens on for incoming client transactions.
     pub client_port: u16,
     pub payload: usize,
-    
+
     /// Crypto primitives
     pub crypto_alg: Algorithm,
     pub pk_map: HashMap<Replica, Vec<u8>>,
     pub secret_key_bytes: Vec<u8>,
 
     /// TLS certificate paths (PEM). Absolute paths written by
-    /// `genconfig`; consumers pass them to the net layer, which loads
-    /// and parses the files at startup.
+    /// `genconfig`. The chain holds `[leaf cert, root CA]` so the same
+    /// file works for both the server identity (leaf) and the trust
+    /// store (root CA).
     pub my_cert_path: String,
     pub my_cert_key_path: String,
     pub root_cert_path: String,
@@ -83,6 +95,7 @@ impl Node {
         Node{
             block_size: 0,
             client_port: 0,
+            client_net_map: HashMap::default(),
             crypto_alg: Algorithm::ED25519,
             delta: 50,
             id: 0,
