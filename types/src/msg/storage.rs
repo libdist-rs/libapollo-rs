@@ -1,11 +1,16 @@
 use crate::{BlockTrait, Height, TxTrait};
 use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use libcrypto::hash::Hash;
-use linked_hash_map::LinkedHashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// Storage holds on to all the blocks and transactions.
-/// Disable feature `mempool` if the end program does not need any client.
+/// Per-node block index. Now purely a *block* store -- transaction
+/// mempool state lives in `libmempool-rs`'s `Mempool` / `Processor` /
+/// `libstorage::Store` pipeline, not in this struct.
+///
+/// The `T: TxTrait` parameter is retained so callers can keep the
+/// existing per-protocol `Storage<Block, Transaction>` aliases
+/// without a per-crate rename.
 pub struct Storage<B, T>
 where
     B: BlockTrait,
@@ -15,8 +20,7 @@ where
     all_delivered_blocks_by_ht: HashMap<Height, Arc<B>>,
     committed_blocks_by_hash: HashSet<Hash<B>>,
     committed_blocks_by_ht: HashSet<Height>,
-    #[cfg(feature = "mempool")]
-    pending_tx: LinkedHashMap<Hash<T>, Arc<T>>,
+    _tx: PhantomData<T>,
 }
 
 impl<B, T> Storage<B, T>
@@ -24,14 +28,13 @@ where
     B: BlockTrait,
     T: TxTrait,
 {
-    pub fn new(space: usize) -> Self {
+    pub fn new() -> Self {
         Storage {
             all_delivered_blocks_by_hash: HashMap::default(),
             all_delivered_blocks_by_ht: HashMap::default(),
             committed_blocks_by_hash: HashSet::default(),
             committed_blocks_by_ht: HashSet::default(),
-            #[cfg(feature = "mempool")]
-            pending_tx: LinkedHashMap::with_capacity(space),
+            _tx: PhantomData,
         }
     }
 
@@ -85,40 +88,5 @@ where
 
     pub fn is_committed_by_hash(&self, hash: &Hash<B>) -> bool {
         self.committed_blocks_by_hash.contains(hash)
-    }
-
-    /// Removes `block_size` transactions from the tx pool (for block creation).
-    #[cfg(feature = "mempool")]
-    pub fn cleave(&mut self, block_size: usize) -> Vec<Arc<T>> {
-        let mut txs = Vec::with_capacity(block_size);
-        for _ in 0..block_size {
-            let (_hash, tx) = self
-                .pending_tx
-                .pop_front()
-                .expect("Dequeued when tx pool was not block size");
-            txs.push(tx);
-        }
-        txs
-    }
-
-    /// Removes the transaction hashes from the pool (called after commit).
-    #[cfg(feature = "mempool")]
-    pub fn clear(&mut self, tx_hashes: &Vec<Hash<T>>) {
-        for h in tx_hashes {
-            self.pending_tx.remove(h);
-        }
-    }
-
-    /// Adds a transaction to the pool.
-    #[cfg(feature = "mempool")]
-    pub fn add_transaction(&mut self, t: T) {
-        let tx_hash = t.get_hash();
-        self.pending_tx.insert(tx_hash, Arc::new(t));
-    }
-
-    /// Returns the number of transactions currently in the tx pool.
-    #[cfg(feature = "mempool")]
-    pub fn get_tx_pool_size(&self) -> usize {
-        self.pending_tx.len()
     }
 }

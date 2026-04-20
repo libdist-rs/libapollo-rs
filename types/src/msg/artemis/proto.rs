@@ -1,13 +1,16 @@
 use libcrypto::hash::Hash;
+use libmempool::Batch;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
 
-use super::{Block, Replica, UCRVote, Vote};
+use super::{Block, Replica, Transaction, UCRVote, Vote};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[repr(u8)]
 pub enum ProtocolMsg {
-    NewBlock(Block),
+    /// View leader's new block together with the referenced batch so
+    /// followers can persist it without a sync round-trip.
+    NewBlock(Block, Batch<Transaction>),
 
     /// Round leader's vote. Sent directly by the round leader, so
     /// `sig.origin` identifies the sender.
@@ -22,9 +25,10 @@ pub enum ProtocolMsg {
     /// Ask a peer to resend the block with the given content hash.
     /// Carries the requester's id so the responder can reply.
     Request(Replica, u64, Hash<Block>),
-    /// Reply carrying the requested block. Carries `from` so the
-    /// requester can request the block's parent from the responder.
-    Response(Replica, u64, Block),
+    /// Reply carrying the requested block + its batch. Carries `from`
+    /// so the requester can request the block's parent from the
+    /// responder.
+    Response(Replica, u64, Block, Batch<Transaction>),
 
     Invalid,
 }

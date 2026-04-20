@@ -1,8 +1,8 @@
 use libcrypto::{hash::Hash, Keypair, PublicKey};
+use libmempool::BatchHash;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
-use std::sync::Arc;
 
 use super::super::Block as OldBlock;
 use super::{Replica, Height, Transaction, Vote};
@@ -27,9 +27,11 @@ pub const GENESIS_BLOCK: Block = Block {
 };
 
 impl Block {
-    pub fn with_tx(txs: Vec<Arc<Transaction>>) -> Self {
+    /// Build a new block that references a batch. Caller is expected
+    /// to populate header fields then `init()` + `sign()`.
+    pub fn with_batch(batch_hash: BatchHash<Transaction>) -> Self {
         Block {
-            blk: OldBlock::with_tx(txs),
+            blk: OldBlock::with_batch(batch_hash),
             sig: Vote {
                 auth: vec![],
                 origin: 0,

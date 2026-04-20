@@ -1,13 +1,15 @@
 use libcrypto::hash::Hash;
+use libmempool::Batch;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
 
-use super::{Block, Certificate, Payload, Propose, View};
+use super::{Block, Certificate, Payload, Propose, Transaction, View};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMsg {
-    /// Leader's new proposal: propose metadata + the block.
-    NewProposal(Propose, Block),
+    /// Leader's new proposal + the referenced batch so followers can
+    /// persist it without a separate sync round-trip.
+    NewProposal(Propose, Block, Batch<Transaction>),
     /// A vote for a proposed block.
     VoteMsg(Certificate, Propose),
     /// Two equivocating proposals from the same leader.
@@ -32,8 +34,9 @@ impl Message for ProtocolMsg {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
-    /// Leader push of a new block.
-    NewBlock(Block, Payload),
+    /// Leader push of a new committed block, with tx hashes hydrated
+    /// by the node from the referenced batch.
+    NewBlock(Block, Vec<Hash<Transaction>>, Payload),
     /// Client asks a node to resend the block with the given hash.
     Request(Hash<Block>),
     Response(Hash<Block>, Block),

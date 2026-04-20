@@ -1,12 +1,6 @@
 use types::synchs::{Block, CertType, Certificate, Propose};
 use libcrypto::hash::Hash;
-use super::{
-    context::Context, 
-    proposal::{
-        on_receive_proposal
-    }
-};
-use std::sync::Arc;
+use super::context::Context;
 
 pub fn add_vote(mut c: Certificate, hash: Hash<Block>, cx: &mut Context) {
     if cx.cert_map.contains_key(&hash) {
@@ -32,6 +26,13 @@ pub fn add_vote(mut c: Certificate, hash: Hash<Block>, cx: &mut Context) {
     }
 }
 
+/// A vote acts on an already-delivered block: we verify the vote
+/// signature, check for equivocation, then fold it into the
+/// certificate. We don't trigger block delivery from here post-mempool
+/// -- the block-with-batch path runs when `ProtocolMsg::NewProposal`
+/// arrives. Pre-mempool, `on_receive_proposal` was called here as a
+/// defensive no-op on already-delivered blocks; it's been dropped since
+/// the batch isn't in hand here anyway.
 pub async fn on_vote(c: Certificate, p: Propose, cx: &mut Context) -> bool {
     let decision = false;
     log::debug!("Received a vote message: {:?}", c);
@@ -80,6 +81,5 @@ pub async fn on_vote(c: Certificate, p: Propose, cx: &mut Context) -> bool {
     }
 
     add_vote(c, blk_hash, cx);
-
-    on_receive_proposal(Arc::new(p), new_block, cx).await
+    decision
 }

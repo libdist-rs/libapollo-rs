@@ -1,4 +1,6 @@
 use super::context::Context;
+use libcrypto::hash::Hash;
+use libmempool::{Batch, BatchHash};
 use std::collections::HashSet;
 use std::sync::Arc;
 use types::synchs::{Block, CertType, Certificate, ProtocolMsg, Propose, Transaction, Vote};
@@ -78,24 +80,49 @@ pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
     true
 }
 
+/// Verify that the batch carried in the proposal hashes to the
+/// batch_hash the block commits to. Cheap sanity check; protects
+/// against a byzantine leader swapping batches post-hash.
+pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
+    let serialized = match bincode::serialize(batch) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Failed to serialize incoming batch for hash check: {}", e);
+            return false;
+        }
+    };
+    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
+    computed == block.body.batch_hash
+}
+
 pub async fn on_receive_proposal(
     p: Arc<Propose>,
     new_block: Arc<Block>,
+    batch: Batch<Transaction>,
     cx: &mut Context,
 ) -> bool {
-    let decision = false;
-
     log::debug!("Received a proposal: {}", new_block.header.height);
 
     if cx.storage.is_delivered_by_hash(&new_block.hash) {
         log::debug!("We have already processed this block last time");
-        return decision;
+        return false;
     }
 
     if !check_proposal(p.as_ref(), new_block.as_ref(), cx) {
         log::warn!("Proposal checking failed");
-        return decision;
+        return false;
     }
+
+    if !check_batch_hash(new_block.as_ref(), &batch) {
+        log::warn!("Batch hash mismatch; dropping proposal");
+        return false;
+    }
+
+    // Persist the batch so `on_commit` can hydrate it later for client
+    // notifications. Done before emitting the vote so a crash between
+    // vote and commit still has a recoverable batch on disk.
+    cx.persist_batch(new_block.body.batch_hash.clone(), &batch).await;
+
     on_new_valid_proposal(p, new_block, cx).await
 }
 
@@ -125,10 +152,9 @@ pub async fn on_new_valid_proposal(
         }
     };
 
-    // State mutation first so that the vote broadcast sees the most
+    // State mutation first so the vote broadcast sees the most
     // recent height for its cancel-handler retention key.
     cx.storage.add_delivered_block(new_block.clone());
-    cx.storage.clear(&new_block.body.tx_hashes);
     cx.height = new_block.header.height;
     cx.last_seen_block = new_block;
     cx.last_seen_cert = p.cert.clone();
@@ -140,14 +166,32 @@ pub async fn on_new_valid_proposal(
     true
 }
 
-pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> (Arc<Propose>, Arc<Block>) {
-    let parent = cx.last_seen_block.clone();
-    let mut new_block = Block::with_tx(txs);
+/// Leader proposes a new block that references an already-batched
+/// tx bundle. Reads the batch from local storage (the mempool
+/// processor wrote it before firing the hash onto `rx_mem_to_consensus`),
+/// wraps it in `Block::with_batch`, and broadcasts.
+pub async fn do_propose(
+    batch_hash: BatchHash<Transaction>,
+    cx: &mut Context,
+) -> Option<(Arc<Propose>, Arc<Block>)> {
+    let batch = match cx.read_batch(&batch_hash).await {
+        Some(b) => b,
+        None => {
+            log::warn!(
+                "Leader's own batch {:?} missing from store; skipping propose",
+                batch_hash
+            );
+            return None;
+        }
+    };
 
+    let parent = cx.last_seen_block.clone();
+
+    let mut new_block = Block::with_batch(batch_hash.clone());
     new_block.header.author = cx.myid;
     new_block.header.prev = parent.hash.clone();
     new_block.header.height = parent.header.height + 1;
-    new_block.hash = new_block.compute_hash();
+    let new_block = new_block.init();
 
     let proof = match cx.my_secret_key.sign(new_block.hash.as_ref()) {
         Err(e) => panic!("Failed to sign the new proposal: {}", e),
@@ -178,9 +222,8 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) -> (Arc<Pr
 
     cx.storage.add_delivered_block(new_block_ref.clone());
 
-    // Broadcast the new proposal to peers.
-    let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone());
+    let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone(), batch);
     cx.multicast(&msg).await;
 
-    (Arc::new(p), new_block_ref)
+    Some((Arc::new(p), new_block_ref))
 }

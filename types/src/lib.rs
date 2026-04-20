@@ -7,7 +7,10 @@ pub use msg::*;
 mod traits;
 pub use traits::*;
 
-pub type View = usize;
+mod sealer;
+pub use sealer::*;
+
+pub type View = u64;
 
 /// Extension trait preserving the libchatter-rs `Keypair::sign(msg)` ergonomic
 /// on top of libcrypto-rs, which routes signing through `SecretKey` instead of

@@ -6,8 +6,9 @@ use super::*;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
-    /// Leader push: propose metadata + block + payload.
-    NewBlock(Propose, Block, Payload),
+    /// Leader push: propose metadata, block (with `batch_hash`), the
+    /// tx hashes hydrated from the referenced batch, and payload.
+    NewBlock(Propose, Block, Vec<Hash<Transaction>>, Payload),
     /// Client asks a node to resend the block with the given hash.
     Request(Hash<Block>),
     /// Reply to a `Request`: expected hash + propose metadata + block.

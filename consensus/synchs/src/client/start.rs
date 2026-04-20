@@ -8,24 +8,16 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
-use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::channel;
 use tokio_stream::StreamExt;
 use types::synchs::{Block, ClientMsg, Replica, Transaction};
 
 pub async fn start(c: &Client, metric: u64, window: usize) {
-    // Two TLS primitives: outgoing `Transaction` pushes to every node,
-    // incoming `ClientMsg` pushes from nodes on the client listener.
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
-
-    // One sender per server address for transaction submission.
+    // Outgoing tx submission: plaintext TCP into the nodes' mempool
+    // client listeners. libmempool-rs owns the server side, which uses
+    // `TcpReceiver`, so we match with `TcpSimpleSender`.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -35,26 +27,23 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TlsReliableSender::<Replica, Transaction>::with_peers_and_options(
-        peer_map,
-        tls(),
-    )
-    .expect("tx sender setup");
+    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
 
-    // Listener for `ClientMsg` pushes from the nodes.
+    // Incoming `ClientMsg` pushes: still TLS, so the node's
+    // commit-notification path continues to carry its existing
+    // authentication. Uses the client's cert as the TLS identity.
+    let tls = || TlsOptions {
+        cert_source: CertSource::PemFiles {
+            cert_chain: PathBuf::from(&c.my_cert_path),
+            private_key: PathBuf::from(&c.my_cert_key_path),
+        },
+        ..TlsOptions::high_throughput()
+    };
     let listen: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
-
-    // Retain cancel handlers long enough for the message to actually
-    // go out. Dropping a handler before the send completes makes the
-    // reliable sender skip the message (see libnet-rs connection.rs).
-    // The client never needs to look at the ack contents, so a simple
-    // flat vector is enough -- we GC lazily whenever it grows big.
-    let mut cancel_handlers: Vec<tls_reliable_sender::CancelHandler> = Vec::new();
-    let handler_budget = 4 * window;
 
     // Transaction producer: fill a channel with pre-built dummy txs so
     // the main loop stays hot.
@@ -87,22 +76,10 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                 if let Some(x) = tx_opt {
                     let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
                     let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    // Broadcast to every server. Current stress-test
-                    // topology has every node accept client txs, so we
-                    // fan out; the batching path on the server side
-                    // dedupes in the mempool.
-                    let results = tx_net.broadcast(&all_servers, bytes).await;
-                    for r in results {
-                        if let Ok(h) = r {
-                            cancel_handlers.push(h);
-                        }
-                    }
-                    if cancel_handlers.len() > handler_budget {
-                        cancel_handlers.retain_mut(|h| matches!(
-                            h.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
-                    }
+                    // Broadcast to every server's mempool. Each node's
+                    // mempool batches independently; consensus will
+                    // commit whichever batch its leader proposes.
+                    let _ = tx_net.broadcast(&all_servers, bytes).await;
                     time_map.insert(hash, SystemTime::now());
                     pending -= 1;
                     log::trace!("Sending transaction to every server");
@@ -113,10 +90,10 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
             },
             block_opt = block_recv.next() => {
                 match block_opt {
-                    Some(Ok(ClientMsg::NewBlock(b, _))) => {
+                    Some(Ok(ClientMsg::NewBlock(b, tx_hashes, _))) => {
                         // Wait for `num_faults+1` distinct blocks
                         // announcing the same hash before counting it
-                        // committed, same rule as the vendored client.
+                        // committed.
                         let entry = count_map.entry(b.hash.clone()).or_insert(0);
                         *entry += 1;
                         if *entry < c.num_faults + 1 {
@@ -128,7 +105,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                         let now = SystemTime::now();
                         pending += c.block_size;
                         num_cmds += c.block_size as u128;
-                        for t in &b.body.tx_hashes {
+                        for t in &tx_hashes {
                             if let Some(old) = time_map.get(t) {
                                 latency_map.insert(t.clone(), (*old, now));
                             } else {

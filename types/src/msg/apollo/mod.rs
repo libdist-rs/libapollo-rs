@@ -16,4 +16,5 @@ pub type Transaction = super::Transaction;
 pub type Replica = crate::Replica;
 pub type Storage = super::Storage<Block, Transaction>;
 pub type Payload = super::Payload;
-pub type Round = usize;
+/// See `types::Height` for why this is `u64` rather than `usize`.
+pub type Round = u64;

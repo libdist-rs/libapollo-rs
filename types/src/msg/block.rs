@@ -1,7 +1,7 @@
 use libcrypto::hash::Hash;
+use libmempool::{Batch, BatchHash};
 use net_common::Message;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::sync::Arc;
 
 use super::{Certificate, Transaction};
 use crate::{protocol::{Height, Replica}, BlockTrait};
@@ -9,8 +9,13 @@ use crate::{protocol::{Height, Replica}, BlockTrait};
 /// Wire format is `(header, body)`; the cached `hash` is never transmitted.
 /// A custom `Deserialize` recomputes it on the way in, so any `Block` that
 /// came off the network carries a valid `hash`. Locally-built blocks
-/// (`with_tx`, `GENESIS_BLOCK`) start with `EMPTY_HASH` and finalize via
+/// (`with_batch`, `GENESIS_BLOCK`) start with `EMPTY_HASH` and finalize via
 /// `Block::init()`.
+///
+/// Post-libmempool-rs the block payload is a single `BatchHash<Transaction>`
+/// (Narwhal-style) rather than an inline `Vec<Hash<Transaction>>`: the
+/// canonical tx ordering lives in the referenced `Batch` stored in
+/// `libstorage::Store`, not the block itself.
 #[derive(Serialize, Debug, Clone)]
 pub struct Block {
     pub header: Header,
@@ -47,10 +52,13 @@ impl<'de> Deserialize<'de> for Block {
 }
 
 impl Block {
-    pub fn with_tx(txs: Vec<Arc<Transaction>>) -> Self {
+    /// Build a block that references the given batch. Caller is
+    /// expected to populate header fields (author, height, prev) and
+    /// finalize with `init()`.
+    pub fn with_batch(batch_hash: BatchHash<Transaction>) -> Self {
         Block {
             header: Header::new(),
-            body: Body::new(txs),
+            body: Body { batch_hash },
             hash: Hash::<Block>::EMPTY_HASH,
         }
     }
@@ -76,7 +84,7 @@ pub const GENESIS_BLOCK: Block = Block {
         blame_certificates: Vec::new(),
     },
     body: Body {
-        tx_hashes: Vec::new(),
+        batch_hash: Hash::<Batch<Transaction>>::EMPTY_HASH,
     },
     hash: Hash::<Block>::EMPTY_HASH,
 };
@@ -104,19 +112,13 @@ impl BlockTrait for Block {
     }
 }
 
+/// The payload reference. A single `BatchHash` rather than inlined
+/// transactions: the batch itself lives in `libstorage::Store`, keyed
+/// by hash. Receivers that don't have the batch already can request
+/// it from the leader or a peer via `MempoolMsg::RequestBatch`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Body {
-    pub tx_hashes: Vec<Hash<Transaction>>,
-}
-
-impl Body {
-    pub fn new(txs: Vec<Arc<Transaction>>) -> Self {
-        let hashes = txs
-            .iter()
-            .map(|tx| Hash::<Transaction>::ser_and_hash(tx.as_ref()))
-            .collect();
-        Self { tx_hashes: hashes }
-    }
+    pub batch_hash: BatchHash<Transaction>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -140,17 +142,9 @@ impl std::fmt::Debug for Header {
 
 impl std::fmt::Debug for Body {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if !self.tx_hashes.is_empty() {
-            f.debug_struct("Block Body")
-                .field("Length", &self.tx_hashes.len())
-                .field("First", &self.tx_hashes[0])
-                .field("Last", &self.tx_hashes[self.tx_hashes.len() - 1])
-                .finish()
-        } else {
-            f.debug_struct("Block Body")
-                .field("Length", &self.tx_hashes.len())
-                .finish()
-        }
+        f.debug_struct("Block Body")
+            .field("batch", &self.batch_hash)
+            .finish()
     }
 }
 

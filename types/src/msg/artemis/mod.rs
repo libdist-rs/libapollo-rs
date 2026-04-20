@@ -20,5 +20,6 @@ pub type Storage = super::Storage<Block, Transaction>;
 pub type Payload = super::Payload;
 /// View number refers to which leader we are at, right now
 pub type View = crate::View;
-/// Round number refers to the UCR round
-pub type Round = usize;
+/// Round number refers to the UCR round. See `types::Height` for why
+/// this is `u64` rather than `usize`.
+pub type Round = u64;

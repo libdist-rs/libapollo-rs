@@ -452,12 +452,20 @@ fn print_summary(results: &[(BenchConfig, Option<BenchResult>)]) {
 
 fn build_matrix() -> Vec<BenchConfig> {
     let mut v = Vec::new();
-    for &protocol in &[
-        Protocol::Apollo,
-        Protocol::Artemis,
-        Protocol::Synchs,
-        Protocol::Optsync,
-    ] {
+    let only = std::env::var("PROTO").ok();
+    let selected: Vec<Protocol> = match only.as_deref() {
+        Some("apollo") => vec![Protocol::Apollo],
+        Some("artemis") => vec![Protocol::Artemis],
+        Some("synchs") => vec![Protocol::Synchs],
+        Some("optsync") => vec![Protocol::Optsync],
+        _ => vec![
+            Protocol::Apollo,
+            Protocol::Artemis,
+            Protocol::Synchs,
+            Protocol::Optsync,
+        ],
+    };
+    for protocol in selected {
         for &(n, f) in &[(3usize, 1usize), (7, 3)] {
             v.push(BenchConfig {
                 protocol,
@@ -480,14 +488,9 @@ async fn main() -> Result<(), BoxErr> {
     // Sanity-check binaries so the first failure is informative, not a cryptic ENOENT.
     for bin in &[
         "genconfig",
-        "node-apollo",
-        "client-apollo",
-        "node-artemis",
-        "client-artemis",
-        "node-synchs",
-        "client-synchs",
-        "node-optsync",
-        "client-optsync",
+        // Per-protocol node/client binaries are checked at run time
+        // so partial migrations (e.g. `PROTO=synchs` while apollo is
+        // still being ported) don't fail here.
     ] {
         let p = repo_root.join(format!("target/release/{}", bin));
         if !p.exists() {
