@@ -1,8 +1,8 @@
 use libcrypto::hash::Hash;
+use net_common::Message;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
@@ -14,16 +14,10 @@ pub enum ClientMsg {
     Response(Hash<Block>, Propose, Block),
 }
 
-impl WireReady for ClientMsg {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).expect("failed to decode the client message")
-    }
+impl Message for ClientMsg {
+    type DeserializationError = bincode::Error;
 
-    fn init(self) -> Self {
-        self
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize client message")
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::DeserializationError> {
+        bincode::deserialize(bytes)
     }
 }

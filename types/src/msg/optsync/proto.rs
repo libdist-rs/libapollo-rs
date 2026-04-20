@@ -1,8 +1,8 @@
 use libcrypto::hash::Hash;
+use net_common::Message;
 use serde::{Deserialize, Serialize};
 
 use super::{Block, Certificate, Payload, Propose, View};
-use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMsg {
@@ -22,17 +22,11 @@ pub enum ProtocolMsg {
     StatusMsg(Certificate),
 }
 
-impl WireReady for ProtocolMsg {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).expect("failed to decode the protocol message")
-    }
+impl Message for ProtocolMsg {
+    type DeserializationError = bincode::Error;
 
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize protocol message")
-    }
-
-    fn init(self) -> Self {
-        self
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::DeserializationError> {
+        bincode::deserialize(bytes)
     }
 }
 
@@ -45,16 +39,10 @@ pub enum ClientMsg {
     Response(Hash<Block>, Block),
 }
 
-impl WireReady for ClientMsg {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).expect("failed to decode the client message")
-    }
+impl Message for ClientMsg {
+    type DeserializationError = bincode::Error;
 
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize client message")
-    }
-
-    fn init(self) -> Self {
-        self
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::DeserializationError> {
+        bincode::deserialize(bytes)
     }
 }

@@ -12,7 +12,7 @@ use tokio_util::codec::{
     FramedRead, 
     FramedWrite
 };
-use types::WireReady;
+use crate::NetMsg;
 use tokio_stream::StreamExt;
 use std::sync::Arc;
 // use tokio::sync::mpsc::{
@@ -31,8 +31,8 @@ use futures::channel::mpsc::{
 /// The types I and O must be thread safe, unpin, and can be encoded, decoded
 /// into.
 pub struct Peer<I,O> 
-where I: WireReady,
-O: WireReady,
+where I: NetMsg,
+O: NetMsg,
 {
     /// Send O msg to this peer
     pub send: UnboundedSender<Arc<O>>,
@@ -49,8 +49,8 @@ enum InternalOutMsg<O> {
 }
 
 impl<'de,I,O> Peer<I,O> 
-where I: WireReady+'static+Sync+Unpin,
-O: WireReady+'static + Clone+Sync,
+where I: NetMsg+'static+Sync+Unpin,
+O: NetMsg+'static + Clone+Sync,
 {
     pub fn new(
         rd: impl AsyncRead + Unpin + Send + 'static,

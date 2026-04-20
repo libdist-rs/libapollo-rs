@@ -1,15 +1,16 @@
 use libcrypto::hash::Hash;
+use net_common::Message;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
 use super::{Certificate, Transaction};
-use crate::{protocol::{Height, Replica}, BlockTrait, WireReady};
+use crate::{protocol::{Height, Replica}, BlockTrait};
 
 /// Wire format is `(header, body)`; the cached `hash` is never transmitted.
 /// A custom `Deserialize` recomputes it on the way in, so any `Block` that
 /// came off the network carries a valid `hash`. Locally-built blocks
 /// (`with_tx`, `GENESIS_BLOCK`) start with `EMPTY_HASH` and finalize via
-/// `WireReady::init()`.
+/// `Block::init()`.
 #[derive(Serialize, Debug, Clone)]
 pub struct Block {
     pub header: Header,
@@ -57,6 +58,13 @@ impl Block {
     pub fn compute_hash(&self) -> Hash<Self> {
         Hash::<Self>::ser_and_hash(self)
     }
+
+    /// Builder finalizer: recompute the cached hash after mutating
+    /// header/body fields.
+    pub fn init(mut self) -> Self {
+        self.hash = self.compute_hash();
+        self
+    }
 }
 
 pub const GENESIS_BLOCK: Block = Block {
@@ -73,21 +81,12 @@ pub const GENESIS_BLOCK: Block = Block {
     hash: Hash::<Block>::EMPTY_HASH,
 };
 
-impl WireReady for Block {
-    fn from_bytes(data: &[u8]) -> Self {
+impl Message for Block {
+    type DeserializationError = bincode::Error;
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::DeserializationError> {
         // Custom Deserialize populates `hash` as part of decoding.
-        bincode::deserialize(data).expect("failed to decode the block")
-    }
-
-    fn init(mut self) -> Self {
-        // Builder path: used after mutating header/body fields to refresh
-        // the cached hash.
-        self.hash = self.compute_hash();
-        self
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize Block")
+        bincode::deserialize(bytes)
     }
 }
 

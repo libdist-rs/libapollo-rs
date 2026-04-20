@@ -24,10 +24,8 @@ use std::{
 };
 use fnv::FnvHashMap as HashMap;
 
-use types::{
-    Replica, 
-    WireReady
-};
+use types::Replica;
+use crate::NetMsg;
 use super::{
     TlsClient, 
 };
@@ -35,8 +33,8 @@ use super::peer::Peer;
 use tokio_stream::StreamExt;
 
 impl<I,O> TlsClient<I,O>
-where I:WireReady + Send + Sync + 'static + Unpin,
-O:WireReady + Clone + Sync + 'static + Unpin, 
+where I:NetMsg + Send + Sync + 'static + Unpin,
+O:NetMsg + Clone + Sync + 'static + Unpin, 
 {
     pub async fn setup(
         &mut self,

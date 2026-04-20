@@ -3,10 +3,8 @@ use tokio::sync::mpsc::{
     UnboundedSender
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{self, ClientConfig}};
-use types::{
-    Replica, 
-    WireReady
-};
+use types::Replica;
+use crate::NetMsg;
 use std::{
     marker::PhantomData, 
     sync::Arc
@@ -14,8 +12,8 @@ use std::{
 use fnv::FnvHashMap as HashMap;
 
 pub struct TlsClient<I,O> 
-where I:WireReady,
-O:WireReady,
+where I:NetMsg,
+O:NetMsg,
 {
     pub(crate) peers: HashMap<Replica, UnboundedSender<Arc<O>>>,
     pub(crate) connector: TlsConnector,
@@ -23,8 +21,8 @@ O:WireReady,
 }
 
 impl<I,O> TlsClient<I,O> 
-where I:WireReady,
-O:WireReady,
+where I:NetMsg,
+O:NetMsg,
 {
     /// Initialize a client manager with the network messages
     pub fn new(root_cert: Vec<u8>) -> Self {
@@ -42,8 +40,8 @@ O:WireReady,
 }
 
 pub struct Protocol<I,O> 
-where I:WireReady,
-O:WireReady,
+where I:NetMsg,
+O:NetMsg,
 {
     pub(crate) my_id: Replica,
     pub(crate) num_nodes: Replica,
@@ -52,8 +50,8 @@ O:WireReady,
 }
 
 impl<I,O> Protocol<I,O> 
-where I:WireReady,
-O:WireReady,
+where I:NetMsg,
+O:NetMsg,
 {
     pub fn new(my_id: Replica, num_nodes: Replica, _root_cert: Vec<u8>, my_cert: Vec<u8>, my_priv_key: Vec<u8>) -> Self {
         let mut config = ServerConfig::new(NoClientAuth::new());

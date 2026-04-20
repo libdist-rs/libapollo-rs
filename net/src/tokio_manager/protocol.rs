@@ -25,10 +25,8 @@ use tokio_util::codec::{
     Decoder, 
     Encoder, 
 };
-use types::{
-    Replica, 
-    WireReady
-};
+use types::Replica;
+use crate::NetMsg;
 use futures::Stream;
 use tokio_stream::{StreamMap, StreamExt};
 use super::peer::Peer;
@@ -42,8 +40,8 @@ type Reader = tokio::net::tcp::OwnedReadHalf;
 type Writer = tokio::net::tcp::OwnedWriteHalf;
 
 impl<I,O> Protocol<I,O>
-where I:WireReady + Send + Sync + 'static + Unpin,
-O:WireReady + Clone + Sync + 'static + Unpin, 
+where I:NetMsg + Send + Sync + 'static + Unpin,
+O:NetMsg + Clone + Sync + 'static + Unpin, 
 {
     pub async fn server_setup(
         &self,
@@ -227,7 +225,7 @@ async fn protocol_event_loop<I,O>(
     mut out_recv: UnboundedReceiver<(Replica, Arc<O>)>,
     mut reading_net: impl Stream<Item=(Replica, I)>+Unpin,
     writers: HashMap<Replica, UnboundedSender<Arc<O>>>
-) where I: WireReady
+) where I: NetMsg
 {
     loop {
         tokio::select!{
@@ -238,7 +236,7 @@ async fn protocol_event_loop<I,O>(
                     std::process::exit(0);
                 }
                 let (id, msg) = opt_in.unwrap();
-                if let Err(e) = in_send.send((id, msg.init())) {
+                if let Err(e) = in_send.send((id, msg)) {
                     log::error!(
                         "Failed to send a protocol message outside the network, with error {}", e);
                     std::process::exit(0);
@@ -311,8 +309,8 @@ async fn client_event_loop<I,O>(
     new_in_ch: UnboundedSender<I>,
     mut new_conn_ch: UnboundedReceiver<TcpStream>,
     cli_acceptor: TlsAcceptor
-) where I:WireReady + Sync + Unpin + 'static,
-O: WireReady + Clone+Unpin+Sync + 'static,
+) where I:NetMsg + Sync + Unpin + 'static,
+O: NetMsg + Clone+Unpin+Sync + 'static,
 {
     let mut read_stream:StreamMap<usize, Pin<Box<dyn Stream<Item=I>+Send>>> = StreamMap::new();
     let mut client_id = 0 as usize;
@@ -327,7 +325,6 @@ O: WireReady + Clone+Unpin+Sync + 'static,
                     std::process::exit(0);
                 }
                 let (_id, msg) = in_opt.unwrap();
-                let msg = msg.init();
                 if let Err(e) = new_in_ch.send(msg) {
                     log::error!("Failed to send an incoming client message outside, with error {}", e);
                     std::process::exit(0);

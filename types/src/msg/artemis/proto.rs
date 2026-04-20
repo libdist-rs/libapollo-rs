@@ -1,8 +1,8 @@
 use libcrypto::hash::Hash;
+use net_common::Message;
 use serde::{Deserialize, Serialize};
 
 use super::{Block, Replica, UCRVote, Vote};
-use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[repr(u8)]
@@ -29,17 +29,11 @@ pub enum ProtocolMsg {
     Invalid,
 }
 
-impl WireReady for ProtocolMsg {
-    fn from_bytes(bytes: &[u8]) -> Self {
+impl Message for ProtocolMsg {
+    type DeserializationError = bincode::Error;
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::DeserializationError> {
         // `Block`'s custom Deserialize populates its hash; no post-process.
-        bincode::deserialize(bytes).expect("failed to decode the protocol message")
-    }
-
-    fn init(self) -> Self {
-        self
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize protocol message")
+        bincode::deserialize(bytes)
     }
 }

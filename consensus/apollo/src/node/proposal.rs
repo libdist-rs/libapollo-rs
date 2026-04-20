@@ -1,6 +1,5 @@
 use types::apollo::{Block, Propose, ProtocolMsg, Transaction, Replica};
 use types::BlockTrait;
-use types::WireReady;
 use super::*;
 use std::sync::Arc;
 
