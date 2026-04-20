@@ -4,7 +4,7 @@
 
 Captured by  : ./target/release/stress-test  (workspace member `stress-test/`)
 Protocols    : Apollo (FC 2023), Artemis, Sync HotStuff, Opt Sync
-Transport    : 127.0.0.1 (loopback, TLS)
+Transport    : 127.0.0.1 (loopback, TLS for consensus + TCP for mempool)
 Block size   : 400 tx / Payload 0B / Window 10000 / Total 50000 tx / release build
 
 Machine      : Apple M1 Pro, 10 cores
@@ -12,28 +12,38 @@ OS           : macOS 26.4.1 (Darwin 25.4.0)
 Toolchain    : rustc 1.91.1
 
 Current dependency state:
-  - libcrypto-rs v0.3.2   (hash + keys; typed `Hash<Block>`, `Hash<Transaction>`)
-  - TODO: libnet-rs        (still using the vendored `net/` crate)
-  - TODO: libmempool-rs    (still using the in-tree tx pool inside types::Storage)
-  - TODO: libstorage-rs    (still using the in-memory block store inside types::Storage)
+  - libcrypto-rs         (hash + keys; typed `Hash<Block>`, `Hash<Transaction>`)
+  - libnet-rs            (TLS consensus + TCP mempool transports)
+  - libmempool-rs        (Narwhal-style mempool; blocks carry `BatchHash`)
+  - libstorage-rs        (per-node rocksdb for persisted batches)
+  - TODO: libstorage-rs  (also replace the in-memory block index)
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────
 │ Protocol            N    f   blk     txs       Throughput          Latency
 ├──────────────────────────────────────────────────────────────────────────────────────────
-│ Apollo              3    1   400   50000   99751.09 tx/s      116.71 ms
-│ Apollo              7    3   400   50000   57489.50 tx/s      262.31 ms
-│ Artemis             3    1   400   50000  111181.21 tx/s       84.62 ms
-│ Artemis             7    3   400   50000   42955.91 tx/s      233.43 ms
-│ Sync HotStuff       3    1   400   50000   72684.48 tx/s      126.49 ms
-│ Sync HotStuff       7    3   400   50000   39376.17 tx/s      239.92 ms
-│ Opt Sync            3    1   400   50000  110861.09 tx/s       80.58 ms
-│ Opt Sync            7    3   400   50000   46360.60 tx/s      203.42 ms
+│ Apollo              3    1   400   50000   19680.09 tx/s      528.84 ms
+│ Apollo              7    3   400   50000    7949.03 tx/s      920.60 ms
+│ Artemis             3    1   400   50000   27815.37 tx/s      357.67 ms
+│ Artemis             7    3   400   50000   18569.88 tx/s      726.40 ms
+│ Sync HotStuff       3    1   400   50000   69747.98 tx/s      127.59 ms
+│ Sync HotStuff       7    3   400   50000   44721.63 tx/s      207.76 ms
+│ Opt Sync            3    1   400   50000  169132.24 tx/s       51.23 ms
+│ Opt Sync            7    3   400   50000   38132.79 tx/s      248.18 ms
 └──────────────────────────────────────────────────────────────────────────────────────────
 
-Note on latency
----------------
-The reported `Avg Latency` is end-to-end from the moment the client fires a
-transaction until the client observes the containing block. Because the test
-keeps 10 000 tx in flight, latency is dominated by queueing
-(a tx waits ~`window / throughput` seconds before being batched into a block).
-To measure raw commit latency, rerun with `-w 1` or a window smaller than one block.
+Notes
+-----
+Latency is end-to-end from client-side submit to client-side commit
+observation. With `window=10000` in flight, latency is dominated by
+queueing (a tx waits ~`window/throughput` seconds before being batched).
+To measure raw commit latency, rerun with `-w 1` or a window smaller
+than one block.
+
+Sync HotStuff and Opt Sync gain 3-5x vs the pre-libmempool direct-TLS
+path: consensus reactors no longer do per-tx `add_transaction` work,
+proposals carry a single `BatchHash` instead of N tx hashes, and
+batching runs concurrently with consensus.
+
+Apollo's round/chain-based client-side commit loop regressed
+(30k -> 19k @ n=3) because the hash-lookup via the new `tx_hash_map`
+serializes with vote processing. Follow-up work.
