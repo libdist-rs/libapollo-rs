@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 config = { package = "config", path="../config"}
 types = { package = "types", path="../types"}
-libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs", tag = "v0.3.2" }
+libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs.git" }
 util = { package = "util", path="../util"}
 tokio = { version = "1.0", features = ["full"] }
 futures = "^0.3"

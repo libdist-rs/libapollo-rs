@@ -19,6 +19,6 @@ fnv = "1"
 log="*"
 simple_logger="*"
 
-net-common = { package = "common", path = "/Users/hermitsage/Github/libnet-rs/common", features = ["tls"] }
-tls-reliable-sender = { path = "/Users/hermitsage/Github/libnet-rs/tls-reliable-sender" }
-tls-receiver = { path = "/Users/hermitsage/Github/libnet-rs/tls-receiver" }
+net-common = { package = "common", git = "https://github.com/libdist-rs/libnet-rs.git", features = ["tls"] }
+tls-reliable-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }
+tls-receiver = { git = "https://github.com/libdist-rs/libnet-rs.git" }
