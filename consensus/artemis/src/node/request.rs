@@ -17,7 +17,7 @@ pub async fn handle_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &mu
     } else {
         cx.undelivered_blocks.get(&h).unwrap().clone()
     };
-    let msg = Arc::new(ProtocolMsg::RawResponse(req_id, blk));
+    let msg = Arc::new(ProtocolMsg::Response(req_id, blk));
     cx.send(sender, msg).await;
 }
 

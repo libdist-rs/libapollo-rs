@@ -30,7 +30,7 @@ pub async fn do_round_vote(cx: &mut Context) {
     v.view = cx.view;
     v.compute_sig(&cx.my_secret_key);
     // Multicast the vote
-    let msg = Arc::new(ProtocolMsg::RawUCRVote(v.clone()));
+    let msg = Arc::new(ProtocolMsg::UCRVote(v.clone()));
     cx.multicast(msg).await;
     let mut block_vec = VecDeque::new();
     let mut tail = v.hash.clone();

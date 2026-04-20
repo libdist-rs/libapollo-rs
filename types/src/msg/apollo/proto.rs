@@ -33,13 +33,12 @@ impl WireReady for ProtocolMsg {
 
     fn init(self) -> Self {
         match self {
-            ProtocolMsg::RawNewProposal(mut prop, mut block) => {
-                block.hash = block.compute_hash();
+            ProtocolMsg::RawNewProposal(mut prop, block) => {
+                // Block's Deserialize impl has already populated `block.hash`.
                 prop.block = Some(Arc::new(block));
                 ProtocolMsg::NewProposal(prop)
             }
-            ProtocolMsg::RawResponse(i, mut prop, mut block) => {
-                block.hash = block.compute_hash();
+            ProtocolMsg::RawResponse(i, mut prop, block) => {
                 prop.block = Some(Arc::new(block));
                 ProtocolMsg::Response(i, prop)
             }

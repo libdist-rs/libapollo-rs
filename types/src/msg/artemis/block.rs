@@ -71,6 +71,8 @@ impl BlockTrait for Block {
 
 impl WireReady for Block {
     fn init(self) -> Self {
+        // Builder path: forwards to `OldBlock::init` to recompute the cached
+        // hash after the caller mutated header/body.
         let nblk = self.blk.init();
         Block {
             blk: nblk,
@@ -83,7 +85,7 @@ impl WireReady for Block {
     }
 
     fn from_bytes(data: &[u8]) -> Self {
-        let c: Self = bincode::deserialize(data).expect("failed to decode the block");
-        c.init()
+        // Inner `OldBlock`'s Deserialize fills its hash; no post-process.
+        bincode::deserialize(data).expect("failed to decode the block")
     }
 }

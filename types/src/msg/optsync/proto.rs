@@ -40,7 +40,7 @@ impl WireReady for ProtocolMsg {
     fn init(self) -> Self {
         match self {
             ProtocolMsg::RawNewProposal(mut p, b) => {
-                let b = b.init();
+                // Block's Deserialize impl has already populated `b.hash`.
                 p.block = Some(Arc::new(b));
                 ProtocolMsg::NewProposal(p)
             }
@@ -88,20 +88,17 @@ impl WireReady for ProtocolMsg {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
-    /// Leader push of a new block; re-packaged into `NewBlock` during `init`.
-    RawNewBlock(Block, Payload),
+    /// Leader push of a new block.
     NewBlock(Block, Payload),
     /// Client asks a node to resend the block with the given hash.
     Request(Hash<Block>),
-    RawResponse(Hash<Block>, Block),
     Response(Hash<Block>, Block),
 }
 
 impl WireReady for ClientMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c: Self =
-            bincode::deserialize(bytes).expect("failed to decode the client message");
-        c.init()
+        // `Block`'s custom Deserialize fills its hash; no post-process needed.
+        bincode::deserialize(bytes).expect("failed to decode the client message")
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -109,16 +106,6 @@ impl WireReady for ClientMsg {
     }
 
     fn init(self) -> Self {
-        match self {
-            ClientMsg::RawNewBlock(mut block, payload) => {
-                block.hash = block.compute_hash();
-                ClientMsg::NewBlock(block, payload)
-            }
-            ClientMsg::RawResponse(h, mut block) => {
-                block.hash = block.compute_hash();
-                ClientMsg::Response(h, block)
-            }
-            other => other,
-        }
+        self
     }
 }

@@ -18,7 +18,7 @@ pub async fn on_commit(p: Arc<Propose>, cx:&mut Context) {
     let ship_b = b.clone();
     let ship_block = tokio::spawn(async move {
         let payload = Payload::with_payload(payload);
-        let msg = ClientMsg::RawNewBlock(
+        let msg = ClientMsg::NewBlock(
             ship_b.as_ref().clone(), payload);
         log::debug!(
             "sending msg: {:?} to the client", msg);

@@ -7,13 +7,13 @@ use super::*;
 /// Buffer and re-order messages by queueing messages. This function adds the message to the correct queues. So that when dequeueing we dequeue them correctly.
 pub fn buffer_message(sender: Replica, message: ProtocolMsg, cx: &mut Context) {
     match message {
-        ProtocolMsg::Invalid | ProtocolMsg::RawNewBlock(..) | ProtocolMsg::RawResponse(..) | ProtocolMsg::RawUCRVote(..) => 
-        (),
-        ProtocolMsg::NewBlock(b) => 
+        ProtocolMsg::Invalid =>
+            (),
+        ProtocolMsg::NewBlock(b) =>
             cx.block_processing_waiting.push_back(b),
-        ProtocolMsg::Response(_, blk) => 
+        ProtocolMsg::Response(_, blk) =>
             cx.response_waiting.push_back((sender,blk)),
-        x => 
+        x =>
             cx.other_buf.push_back((sender, x)),
     }
 }

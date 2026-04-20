@@ -26,13 +26,11 @@ impl WireReady for ClientMsg {
 
     fn init(self) -> Self {
         match self {
-            ClientMsg::RawNewBlock(mut prop, mut block, payload) => {
-                block.hash = block.compute_hash();
+            ClientMsg::RawNewBlock(mut prop, block, payload) => {
                 prop.block = Some(Arc::new(block));
                 ClientMsg::NewBlock(prop, payload)
             }
-            ClientMsg::RawResponse(h, mut prop, mut block) => {
-                block.hash = block.compute_hash();
+            ClientMsg::RawResponse(h, mut prop, block) => {
                 prop.block = Some(Arc::new(block));
                 ClientMsg::Response(h, prop)
             }

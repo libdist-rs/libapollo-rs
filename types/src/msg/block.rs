@@ -1,24 +1,48 @@
 use libcrypto::hash::Hash;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
 use super::{Certificate, Transaction};
 use crate::{protocol::{Height, Replica}, BlockTrait, WireReady};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Wire format is `(header, body)`; the cached `hash` is never transmitted.
+/// A custom `Deserialize` recomputes it on the way in, so any `Block` that
+/// came off the network carries a valid `hash`. Locally-built blocks
+/// (`with_tx`, `GENESIS_BLOCK`) start with `EMPTY_HASH` and finalize via
+/// `WireReady::init()`.
+#[derive(Serialize, Debug, Clone)]
 pub struct Block {
     pub header: Header,
     pub body: Body,
-
-    /// Cache -- populated by `init()` after deserialization, not wire-transmitted.
-    /// Explicit `default` because the auto-derived `Default` on libcrypto's
-    /// `Hash<T>` bounds on `T: Default`, which Block cannot satisfy (cyclic).
-    #[serde(skip, default = "empty_block_hash")]
+    #[serde(skip)]
     pub hash: Hash<Block>,
 }
 
-fn empty_block_hash() -> Hash<Block> {
-    Hash::<Block>::EMPTY_HASH
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // `Wire` mirrors `Block` minus the skipped `hash`. Bincode encodes
+        // struct fields positionally without names or length markers, so the
+        // bytes for `Block` (with `hash` skipped) and `Wire` are identical.
+        // Hashing the reconstructed `Block` therefore matches what the
+        // sender hashed. A self-describing format (JSON, CBOR, MessagePack)
+        // would break that identity.
+        #[derive(Deserialize)]
+        struct Wire {
+            header: Header,
+            body: Body,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        let mut block = Block {
+            header: w.header,
+            body: w.body,
+            hash: Hash::<Block>::EMPTY_HASH,
+        };
+        block.hash = Hash::<Block>::ser_and_hash(&block);
+        Ok(block)
+    }
 }
 
 impl Block {
@@ -51,11 +75,13 @@ pub const GENESIS_BLOCK: Block = Block {
 
 impl WireReady for Block {
     fn from_bytes(data: &[u8]) -> Self {
-        let c: Self = bincode::deserialize(data).expect("failed to decode the block");
-        c.init()
+        // Custom Deserialize populates `hash` as part of decoding.
+        bincode::deserialize(data).expect("failed to decode the block")
     }
 
     fn init(mut self) -> Self {
+        // Builder path: used after mutating header/body fields to refresh
+        // the cached hash.
         self.hash = self.compute_hash();
         self
     }

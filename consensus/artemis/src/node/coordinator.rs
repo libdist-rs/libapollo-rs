@@ -25,7 +25,7 @@ pub async fn do_new_block(txs: Vec<Arc<Transaction>>, cx:&mut Context)
     new_block.sign(&cx.my_secret_key);
     
     // Send this new block to everyone
-    let msg = Arc::new(ProtocolMsg::RawNewBlock(new_block.clone()));
+    let msg = Arc::new(ProtocolMsg::NewBlock(new_block.clone()));
     cx.multicast(msg.clone()).await;
     log::debug!("Broadcasting new blocks to all the nodes");
     

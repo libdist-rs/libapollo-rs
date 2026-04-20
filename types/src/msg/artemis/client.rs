@@ -27,16 +27,14 @@ impl WireReady for ClientMsg {
     }
 
     fn init(self) -> Self {
+        // Block hashes are populated by the inner `Block`'s Deserialize; this
+        // pass only performs wire-level validation.
         match self {
             ClientMsg::RawNewBlock(vote, block_vec) => {
                 if block_vec.is_empty() {
                     log::warn!("Got a vote with 0 blocks");
                     return ClientMsg::Invalid;
                 }
-                let block_vec: Vec<_> = block_vec
-                    .into_iter()
-                    .map(|(block, pl)| (block.init(), pl))
-                    .collect();
                 if block_vec.last().unwrap().0.get_hash() != vote.hash {
                     log::warn!("The hash of the last block does not match the vote's hash");
                     return ClientMsg::Invalid;
@@ -44,7 +42,6 @@ impl WireReady for ClientMsg {
                 ClientMsg::NewBlock(vote, block_vec)
             }
             ClientMsg::RawResponseBlock(h, block) => {
-                let block = block.init();
                 if block.get_hash() == h {
                     ClientMsg::ResponseBlock(h, block)
                 } else {
