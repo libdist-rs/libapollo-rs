@@ -59,17 +59,19 @@ pub async fn start(
         let mut cx = cx;
         for _ in 0..(first_recv) {
             let (_, msg) = net_recv.next().await.unwrap();
-            let prop = match msg {
-                ClientMsg::NewBlock(p,_pl) => p,
+            let (prop, block) = match msg {
+                ClientMsg::NewBlock(p, b, _pl) => (p, b),
                 _ => continue,
             };
-            update_props(prop, &mut cx);
+            update_props(prop, block, &mut cx);
             while let Some(p) = cx.future_msgs.remove(&cx.round) {
-                let b = p.block.clone().unwrap();
+                let b = cx
+                    .storage
+                    .delivered_block_from_hash(&p.block_hash)
+                    .expect("block must be in storage");
                 if !cx.storage.is_delivered_by_hash(&b.header.prev.clone()) {
                     panic!("Got an undelivered block");
                 }
-                cx.storage.add_delivered_block(b);
                 cx.round += 1;
             }
         }
@@ -107,13 +109,13 @@ pub async fn start(
                 }
                 let (_, msg) = block_opt.unwrap();
                 log::debug!("Got a client message: {:?}", msg);
-                let prop = match msg {
-                    ClientMsg::NewBlock(p, _pl) => p,
+                let (prop, block) = match msg {
+                    ClientMsg::NewBlock(p, b, _pl) => (p, b),
                     _ => continue,
                 };
-                update_props(prop, &mut cx);
-                while let Ok(Some((_, ClientMsg::NewBlock(p,_)))) = net_recv.try_next() {
-                    update_props(p, &mut cx);
+                update_props(prop, block, &mut cx);
+                while let Ok(Some((_, ClientMsg::NewBlock(p, b, _)))) = net_recv.try_next() {
+                    update_props(p, b, &mut cx);
                 }
                 handle_new_blocks(c, &mut cx, now);
             } 
@@ -126,7 +128,7 @@ pub async fn start(
     }
 }
 
-fn update_props(p: Propose, cx:&mut Context) {
+fn update_props(p: Propose, b: types::apollo::Block, cx:&mut Context) {
     if p.round < cx.round {
         if cx.storage.is_delivered_by_hash(&p.block_hash.clone()) {
             log::warn!("Got a block {} from the past - {}", p.round, cx.round);
@@ -136,16 +138,19 @@ fn update_props(p: Propose, cx:&mut Context) {
             panic!("equivocation detected");
         }
     }
+    cx.storage.add_delivered_block(Arc::new(b));
     cx.future_msgs.insert(p.round, p);
 }
 
 // Handle future blocks
 fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
     while let Some(p) = cx.future_msgs.remove(&cx.round) {
-        let b = p.block.clone().unwrap();
-        cx.storage.add_delivered_block(b.clone());
+        let b = cx
+            .storage
+            .delivered_block_from_hash(&p.block_hash)
+            .expect("block must have been added in update_props");
         if !cx.storage.is_delivered_by_hash(&b.header.prev.clone()) {
-            panic!("Do not have parent for this block {:?}, yet",b);
+            panic!("Do not have parent for this block {:?}, yet", b);
         }
         cx.pending += c.block_size;
         if cx.round <= c.num_faults {
@@ -156,7 +161,7 @@ fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
         let commit_round = cx.round - c.num_faults;
         let commit_block = cx.storage.delivered_block_from_ht(commit_round)
             .expect(format!("Must be in the height map:cxr: {}, cmr:{}", cx.round, commit_round).as_str());
-        
+
         // Use f+1 rule to commit the block
         cx.num_cmds += c.block_size as u128;
         for t in &commit_block.body.tx_hashes {

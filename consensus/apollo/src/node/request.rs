@@ -12,9 +12,12 @@ pub async fn on_recv_request(sender:Replica, req_id: u64, h: Hash<Block>, cx: &m
         None => return,
         Some(x) => x.clone(),
     };
+    let blk = match cx.storage.delivered_block_from_hash(&h) {
+        None => return,
+        Some(b) => b.as_ref().clone(),
+    };
     let prop = p_arc.as_ref().clone();
-    let blk = p_arc.block.clone().unwrap().as_ref().clone();
-    let msg = ProtocolMsg::RawResponse(req_id, prop, blk);
+    let msg = ProtocolMsg::Response(req_id, prop, blk);
     cx.send(sender, Arc::new(msg)).await;
 }
 

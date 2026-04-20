@@ -1,12 +1,14 @@
 use libcrypto::hash::Hash;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use super::{Block, Certificate, View};
 
+/// Opt Sync proposal metadata. The block is carried alongside in the enum
+/// variant (`ProtocolMsg::NewProposal`, `ClientMsg::NewBlock`); it is not
+/// embedded here.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Propose {
-    /// Signature by the author.
+    /// Signature by the author over `block_hash`.
     pub proof: Vec<u8>,
     /// Certificate for the parent of this block.
     pub cert: Certificate,
@@ -14,13 +16,6 @@ pub struct Propose {
     pub view: View,
     /// Hash of the block being proposed.
     pub block_hash: Hash<Block>,
-
-    #[serde(skip_serializing, skip_deserializing, default = "empty_block_hash_option")]
-    pub block: Option<Arc<Block>>,
-}
-
-fn empty_block_hash_option() -> Option<Arc<Block>> {
-    None
 }
 
 impl Propose {
@@ -29,7 +24,6 @@ impl Propose {
             proof: Vec::new(),
             cert: Certificate::empty_cert(),
             view: 0,
-            block: None,
             block_hash: Hash::<Block>::EMPTY_HASH,
         }
     }

@@ -38,12 +38,12 @@ pub async fn reactor(
         loop {
             let msg_arc = recv.next().await.unwrap().as_ref().clone();
             let msg = match msg_arc {
-                ClientMsg::RawNewBlock(v, block_vec) => {
+                ClientMsg::NewBlock(v, block_vec) => {
                     let block_vec = block_vec.into_iter().map(|(b, _pl)| {
                         let payload = Payload::with_payload(pl_size);
                         (b, payload)
                     }).collect();
-                    ClientMsg::RawNewBlock(v, block_vec)
+                    ClientMsg::NewBlock(v, block_vec)
                 },
                 _ => continue,
             };

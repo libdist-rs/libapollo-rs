@@ -43,7 +43,7 @@ pub async fn do_round_vote(cx: &mut Context) {
     let block_vec = block_vec.into_iter().map(|b|{
         (b,Payload::empty())
     }).collect();
-    let msg = Arc::new(ClientMsg::RawNewBlock(v.clone(), block_vec));
+    let msg = Arc::new(ClientMsg::NewBlock(v.clone(), block_vec));
     cx.multicast_client(msg).await;
     // Process self vote
     on_receive_round_vote(cx, v).await;

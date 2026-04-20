@@ -1,5 +1,5 @@
 use tokio::task::JoinHandle;
-use types::apollo::{Propose, ProtocolMsg, Replica};
+use types::apollo::{Block, Propose, ProtocolMsg, Replica};
 
 use super::context::Context;
 use futures::SinkExt;
@@ -42,8 +42,8 @@ impl Context {
     }
 
     /// Multicast (Sendall) message to all the clients
-    pub(crate) async fn multicast_client(&mut self, msg: Arc<Propose>) {
-        if let Err(e) = self.cli_send.send(msg)
+    pub(crate) async fn multicast_client(&mut self, p: Arc<Propose>, b: Arc<Block>) {
+        if let Err(e) = self.cli_send.send((p, b))
             .await {
             log::warn!(
                 "Server channel closed with error: {}", e);

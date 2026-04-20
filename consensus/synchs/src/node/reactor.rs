@@ -41,19 +41,18 @@ pub async fn reactor(
                 };
                 log::debug!(
                     "Received protocol message: {:?}", protmsg);
-                if let ProtocolMsg::NewProposal(p) = protmsg {
+                if let ProtocolMsg::NewProposal(p, b) = protmsg {
                     log::debug!("Received a proposal: {:?}", p);
                     let p = Arc::new(p);
-                    let decision = on_receive_proposal(p.clone(), &mut cx).await;
-                    log::debug!(
-                        "Decision for the incoming proposal is {}", decision);
+                    let b = Arc::new(b);
+                    let decision = on_receive_proposal(p.clone(), b, &mut cx).await;
+                    log::debug!("Decision for the incoming proposal is {}", decision);
                     if decision {
                         cx.commit_queue.insert(p, d2);
                     }
                 }
-                else if let ProtocolMsg::VoteMsg(v,p) = protmsg {
-                    log::debug!(
-                        "Received a vote for a proposal: {:?}", v);
+                else if let ProtocolMsg::VoteMsg(v, p) = protmsg {
+                    log::debug!("Received a vote for a proposal: {:?}", v);
                     on_vote(v, p, &mut cx).await;
                 }
             },
@@ -94,7 +93,7 @@ pub async fn reactor(
         {
             log::debug!("I {} am the leader and, I am proposing", cx.myid);
             let txs = cx.storage.cleave(block_size);
-            let p = do_propose(txs, &mut cx).await;
+            let (p, _b) = do_propose(txs, &mut cx).await;
             // Leader setting the timer now
             cx.commit_queue.insert(p, d2);
         }

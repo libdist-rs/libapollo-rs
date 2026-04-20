@@ -39,11 +39,11 @@ pub async fn reactor(
     let payload_adder = async move {
         let mut cli_send = cli_send_p;
         loop {
-            let prop_arc = recv.next().await.unwrap();
+            let (prop_arc, block_arc) = recv.next().await.unwrap();
             let payload = Payload::with_payload(pl_size);
             let prop = prop_arc.as_ref().clone();
-            let bl = prop.block.as_ref().unwrap().as_ref().clone();
-            cli_send.send(Arc::new(ClientMsg::RawNewBlock(prop, bl, payload))).await.unwrap();
+            let bl = block_arc.as_ref().clone();
+            cli_send.send(Arc::new(ClientMsg::NewBlock(prop, bl, payload))).await.unwrap();
         }
     };
     rt.spawn(payload_adder);

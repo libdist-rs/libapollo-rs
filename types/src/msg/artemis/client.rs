@@ -2,54 +2,28 @@ use libcrypto::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use super::{Block, Payload, UCRVote};
-use crate::{BlockTrait, WireReady};
+use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ClientMsg {
     /// Leader push: a UCRVote plus the series of blocks it commits to.
-    /// `init` validates the final block's hash matches the vote and
-    /// collapses to `NewBlock`.
-    RawNewBlock(UCRVote, Vec<(Block, Payload)>),
+    /// The client validates that the last block's hash matches the vote
+    /// before acting on it.
     NewBlock(UCRVote, Vec<(Block, Payload)>),
     /// Client asks a node to resend the block with the given hash.
     RequestBlock(Hash<Block>),
-    RawResponseBlock(Hash<Block>, Block),
+    /// Reply: requested hash + block. Client validates the returned
+    /// block's hash matches the requested hash.
     ResponseBlock(Hash<Block>, Block),
-    /// Invalid / wire-validation failure.
-    Invalid,
 }
 
 impl WireReady for ClientMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c: Self =
-            bincode::deserialize(bytes).expect("failed to decode the client message");
-        c.init()
+        bincode::deserialize(bytes).expect("failed to decode the client message")
     }
 
     fn init(self) -> Self {
-        // Block hashes are populated by the inner `Block`'s Deserialize; this
-        // pass only performs wire-level validation.
-        match self {
-            ClientMsg::RawNewBlock(vote, block_vec) => {
-                if block_vec.is_empty() {
-                    log::warn!("Got a vote with 0 blocks");
-                    return ClientMsg::Invalid;
-                }
-                if block_vec.last().unwrap().0.get_hash() != vote.hash {
-                    log::warn!("The hash of the last block does not match the vote's hash");
-                    return ClientMsg::Invalid;
-                }
-                ClientMsg::NewBlock(vote, block_vec)
-            }
-            ClientMsg::RawResponseBlock(h, block) => {
-                if block.get_hash() == h {
-                    ClientMsg::ResponseBlock(h, block)
-                } else {
-                    ClientMsg::Invalid
-                }
-            }
-            other => other,
-        }
+        self
     }
 
     fn to_bytes(&self) -> Vec<u8> {

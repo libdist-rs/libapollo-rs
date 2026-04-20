@@ -1,14 +1,13 @@
 use libcrypto::hash::Hash;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-use super::{Block, CertType, Certificate, Payload, Propose, View};
+use super::{Block, Certificate, Payload, Propose, View};
 use crate::WireReady;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMsg {
-    RawNewProposal(Propose, Block),
-    NewProposal(Propose),
+    /// Leader's new proposal: propose metadata + the block.
+    NewProposal(Propose, Block),
     /// A vote for a proposed block.
     VoteMsg(Certificate, Propose),
     /// Two equivocating proposals from the same leader.
@@ -21,16 +20,11 @@ pub enum ProtocolMsg {
     QuitViewMsg(View, Certificate),
     /// Status: block + its certificate.
     StatusMsg(Certificate),
-    INVALID,
 }
-
-impl ProtocolMsg {}
 
 impl WireReady for ProtocolMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        let c: Self =
-            bincode::deserialize(bytes).expect("failed to decode the protocol message");
-        c.init()
+        bincode::deserialize(bytes).expect("failed to decode the protocol message")
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -38,51 +32,7 @@ impl WireReady for ProtocolMsg {
     }
 
     fn init(self) -> Self {
-        match self {
-            ProtocolMsg::RawNewProposal(mut p, b) => {
-                // Block's Deserialize impl has already populated `b.hash`.
-                p.block = Some(Arc::new(b));
-                ProtocolMsg::NewProposal(p)
-            }
-            ProtocolMsg::VoteMsg(ref c, _) => {
-                if matches!(&c.msg, CertType::Vote(_, _)) {
-                    self
-                } else {
-                    log::debug!("Invalid {:?}", self);
-                    ProtocolMsg::INVALID
-                }
-            }
-            ProtocolMsg::EquivcationBlameMsg(_, _, ref c) => {
-                if matches!(&c.msg, CertType::Blame(_, _)) {
-                    self
-                } else {
-                    log::debug!("Invalid {:?}", self);
-                    ProtocolMsg::INVALID
-                }
-            }
-            ProtocolMsg::NoProgressBlameMsg(ref c) => {
-                if matches!(&c.msg, CertType::Blame(_, _)) {
-                    self
-                } else {
-                    log::debug!("Invalid {:?}", self);
-                    ProtocolMsg::INVALID
-                }
-            }
-            ProtocolMsg::ChangeView(ref v, ref c) => {
-                if let CertType::Vote(ref x, _) = c.msg {
-                    if *v == *x {
-                        self
-                    } else {
-                        log::debug!("Invalid {:?}", self);
-                        ProtocolMsg::INVALID
-                    }
-                } else {
-                    log::debug!("Invalid {:?}", self);
-                    ProtocolMsg::INVALID
-                }
-            }
-            other => other,
-        }
+        self
     }
 }
 
@@ -97,7 +47,6 @@ pub enum ClientMsg {
 
 impl WireReady for ClientMsg {
     fn from_bytes(bytes: &[u8]) -> Self {
-        // `Block`'s custom Deserialize fills its hash; no post-process needed.
         bincode::deserialize(bytes).expect("failed to decode the client message")
     }
 

@@ -2,6 +2,7 @@ use std::convert::TryFrom;
 use std::time::SystemTime;
 use config::Client;
 use types::artemis::{Block, ClientMsg, Payload, Transaction, UCRVote};
+use types::BlockTrait;
 use tokio::sync::mpsc::{Receiver, channel};
 use consensus::statistics;
 use std::sync::Arc;
@@ -96,15 +97,24 @@ pub async fn start(
 }
 
 /// We got a new vote message. Check if we are in the correct round and then process it.
-async fn try_new_round(v: UCRVote, 
-    block_vec: Vec<(Block, Payload)>, 
+async fn try_new_round(v: UCRVote,
+    block_vec: Vec<(Block, Payload)>,
     cx:&mut Context,
     ts: SystemTime,
-) 
+)
 {
+    // Wire-level validation (previously in ClientMsg::init).
+    if block_vec.is_empty() {
+        log::warn!("Got a vote with 0 blocks");
+        return;
+    }
+    if block_vec.last().unwrap().0.get_hash() != v.hash {
+        log::warn!("The hash of the last block does not match the vote's hash");
+        return;
+    }
+
     if cx.round() < v.round {
         log::debug!("We got a vote from the future");
-        // TODO
         cx.future_msgs.insert(v.round, (v, block_vec));
         return;
     }

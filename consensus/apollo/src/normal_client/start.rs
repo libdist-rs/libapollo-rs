@@ -106,15 +106,15 @@ pub async fn start(
                 log::debug!(
                     "Got {:?} from the network", block_opt);
                 // Got something from the network
-                let b = if let Some((_, ClientMsg::NewBlock(p,_))) = block_opt {
-                        p.block.clone().unwrap()
+                let b = if let Some((_, ClientMsg::NewBlock(_p, b, _))) = block_opt {
+                        Arc::new(b)
                 } else {
                     panic!("Got invalid block from the nodes: {:?}", block_opt);
                 };
                 log::trace!("got a block:{:?}",b);
                 new_blocks.push_back(b);
-                while let Ok(Some((_, ClientMsg::NewBlock(p,_)))) = net_recv.try_next() {
-                    new_blocks.push_back(p.block.clone().unwrap());
+                while let Ok(Some((_, ClientMsg::NewBlock(_p, b, _)))) = net_recv.try_next() {
+                    new_blocks.push_back(Arc::new(b));
                 }
                 process_blocks(c, now, &mut new_blocks, &mut cx);
                 log::debug!("Sending {} commands to the nodes", cx.pending);

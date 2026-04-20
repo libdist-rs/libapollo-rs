@@ -34,16 +34,13 @@ pub fn add_vote(mut c: Certificate, hash: Hash<Block>, cx: &mut Context) -> bool
     return commit_decision;
 }
 
-pub async fn on_vote(c: Certificate, p: &mut Propose, cx: &mut Context) -> bool {
+pub async fn on_vote(c: Certificate, p: &Propose, cx: &mut Context) -> bool {
     let decision = false;
 
     if c.votes.len() != 1 {
-        log::warn!(
-            "Invalid number of votes in vote message");
+        log::warn!("Invalid number of votes in vote message");
         return false;
     }
-    // Check if we have already processed the block for which we have the vote
-    // and if not check if it is valid
     let vote = &c.votes[0];
     let pk = match cx.pub_key_map.get(&vote.origin) {
         None => {
@@ -68,39 +65,26 @@ pub async fn on_vote(c: Certificate, p: &mut Propose, cx: &mut Context) -> bool 
     }
 
     if !cx.storage.is_delivered_by_hash(&blk_hash) {
-        log::debug!(
-            "Received vote for an undelivered block");
+        log::debug!("Received vote for an undelivered block");
         return decision;
     }
 
     let new_block = cx.storage.delivered_block_from_hash(&blk_hash).unwrap();
-    p.block = Some(new_block);
-    let new_block = p.block.as_ref().unwrap().as_ref();
 
     // Is this an equivocation?
-    if let Some(x) = cx.storage.delivered_block_from_ht(new_block.header.height) 
-    {
-        // We already have a block at this height
-        // Check if this is an equivocation
+    if let Some(x) = cx.storage.delivered_block_from_ht(new_block.header.height) {
         if x.hash != blk_hash {
-            log::warn!("Got an equivocation: {:?}, {:?}", 
+            log::warn!("Got an equivocation: {:?}, {:?}",
                 x.header, new_block.header);
             return decision;
-        } 
+        }
     }
 
-    // Already have a responsive certificate, discard extra votes
     if cx.resp_cert.contains_key(&blk_hash) {
         log::debug!("Extra vote received. discarding");
         return decision;
     }
 
     log::debug!("Adding a vote");
-    // This is a vote for a new delivered block
-    let commit_decision = add_vote(c, blk_hash, cx);
-
-    // Let the reactor know that we have to start the commit timers for this
-    // block, if this is a new proposal
-    // return on_receive_proposal(Arc::new(p), cx).await;
-    return commit_decision;
+    add_vote(c, blk_hash, cx)
 }

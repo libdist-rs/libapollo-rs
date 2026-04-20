@@ -25,10 +25,13 @@ pub struct Context {
 
     /// Network context
     pub net_send: UnboundedSender<(Replica, Arc<ProtocolMsg>)>,
-    pub cli_send: UnboundedSender<Arc<Propose>>,
+    pub cli_send: UnboundedSender<(Arc<Propose>, Arc<Block>)>,
 
-    // Reordering context
-    pub prop_buf: VecDeque<(Replica, Propose)>,
+    // Reordering context: proposals that arrived with their block ride in
+    // `prop_buf`; relays arrive block-less and fetch from storage (or
+    // request) in `relay_buf`. `future_msgs` parks out-of-order proposals
+    // after their block has already landed in storage.
+    pub prop_buf: VecDeque<(Replica, Propose, Block)>,
     pub relay_buf: VecDeque<(Replica, Propose)>,
     pub other_buf: VecDeque<(Replica, ProtocolMsg)>,
     pub future_msgs: HashMap<Round, (Replica, Propose)>,
@@ -58,7 +61,7 @@ const EXTRA_SPACE:usize = 100;
 impl Context {
     pub fn new(config:&Node,
         net_send: UnboundedSender<(Replica, Arc<ProtocolMsg>)>,
-        cli_send: UnboundedSender<Arc<Propose>>,
+        cli_send: UnboundedSender<(Arc<Propose>, Arc<Block>)>,
         is_apollo_enabled: bool,
     ) -> Self {
         let mut c = Context{
