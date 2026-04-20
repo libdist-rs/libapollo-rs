@@ -2,28 +2,22 @@ use bytes::Bytes;
 use config::Client;
 use consensus::statistics;
 use fnv::FnvHashMap as HashMap;
+use libcrypto::hash::Hash;
 use net_common::{CertSource, TlsOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
-use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::channel;
 use tokio_stream::StreamExt;
 use types::apollo::{ClientMsg, Propose, Replica, Transaction};
 use super::Context;
 
 pub async fn start(c: &Client, metric: u64, window: usize) {
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
-
-    // Outgoing sender: client -> every server.
+    // Outgoing tx submission: plaintext TCP into each node's mempool
+    // client listener.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -33,22 +27,22 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TlsReliableSender::<Replica, Transaction>::with_peers_and_options(
-        peer_map,
-        tls(),
-    )
-    .expect("tx sender setup");
+    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
 
-    // Incoming receiver: servers push `ClientMsg::NewBlock` here.
+    // Incoming `ClientMsg` pushes: TLS, using client's cert as the
+    // server-side identity.
+    let tls = || TlsOptions {
+        cert_source: CertSource::PemFiles {
+            cert_chain: PathBuf::from(&c.my_cert_path),
+            private_key: PathBuf::from(&c.my_cert_key_path),
+        },
+        ..TlsOptions::high_throughput()
+    };
     let listen: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
-
-    // Cancel-handler bag, GC'd in chunks.
-    let mut cancel_handlers: Vec<tls_reliable_sender::CancelHandler> = Vec::new();
-    let handler_budget = 4 * window;
 
     let payload = c.payload;
     let (send, mut recv) = channel(util::CHANNEL_SIZE);
@@ -76,17 +70,12 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
     for _ in 0..first_send {
         let next = recv.recv().await.unwrap();
         let bytes = Bytes::from(bincode::serialize(next.as_ref()).expect("tx serialize"));
-        let results = tx_net.broadcast(&all_servers, bytes).await;
-        for r in results {
-            if let Ok(h) = r {
-                cancel_handlers.push(h);
-            }
-        }
+        let _ = tx_net.broadcast(&all_servers, bytes).await;
     }
 
     // Absorb the first `f` blocks so the client's `Context` is round-synced
     // before we start latency-tracking.
-    let first_recv = c.num_faults;
+    let first_recv = c.num_faults as u64;
     log::debug!("Receiving first {} blocks", first_recv);
     for _ in 0..first_recv {
         let msg = match block_recv.next().await {
@@ -94,8 +83,8 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
             Some(Err(e)) => panic!("bad ClientMsg bytes: {}", e),
             None => panic!("server push listener closed"),
         };
-        let (prop, block) = match msg {
-            ClientMsg::NewBlock(p, b, _pl) => (p, b),
+        let (prop, block, _tx_hashes) = match msg {
+            ClientMsg::NewBlock(p, b, tx_hashes, _pl) => (p, b, tx_hashes),
             _ => continue,
         };
         update_props(prop, block, &mut cx);
@@ -118,20 +107,9 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         tokio::select! {
             tx_opt = recv.recv(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = libcrypto::hash::Hash::<Transaction>::ser_and_hash(x.as_ref());
+                    let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
                     let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let results = tx_net.broadcast(&all_servers, bytes).await;
-                    for r in results {
-                        if let Ok(h) = r {
-                            cancel_handlers.push(h);
-                        }
-                    }
-                    if cancel_handlers.len() > handler_budget {
-                        cancel_handlers.retain_mut(|h| matches!(
-                            h.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
-                    }
+                    let _ = tx_net.broadcast(&all_servers, bytes).await;
                     cx.time_map.insert(hash, SystemTime::now());
                     cx.pending -= 1;
                 } else {
@@ -149,16 +127,20 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                     }
                     None => panic!("server push listener closed"),
                 };
-                let (prop, block) = match msg {
-                    ClientMsg::NewBlock(p, b, _pl) => (p, b),
+                let (prop, block, tx_hashes) = match msg {
+                    ClientMsg::NewBlock(p, b, tx_hashes, _pl) => (p, b, tx_hashes),
                     _ => continue,
                 };
+                let prop_round = prop.round;
                 update_props(prop, block, &mut cx);
+                cx.tx_hash_map.insert(prop_round, tx_hashes);
                 // Drain any other ready blocks in one pass.
-                while let Some(Ok(ClientMsg::NewBlock(p, b, _))) =
+                while let Some(Ok(ClientMsg::NewBlock(p, b, tx_hashes, _))) =
                     futures::FutureExt::now_or_never(block_recv.next()).flatten()
                 {
+                    let r = p.round;
                     update_props(p, b, &mut cx);
+                    cx.tx_hash_map.insert(r, tx_hashes);
                 }
                 handle_new_blocks(c, &mut cx, now);
             }
@@ -181,8 +163,9 @@ fn update_props(p: Propose, b: types::apollo::Block, cx: &mut Context) {
             panic!("equivocation detected");
         }
     }
+    let round = p.round;
     cx.storage.add_delivered_block(Arc::new(b));
-    cx.future_msgs.insert(p.round, p);
+    cx.future_msgs.insert(round, p);
 }
 
 fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
@@ -195,13 +178,15 @@ fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
             panic!("Do not have parent for this block {:?}, yet", b);
         }
         cx.pending += c.block_size;
-        if cx.round <= c.num_faults {
+        if cx.round <= c.num_faults as u64 {
             cx.round += 1;
             return;
         }
         log::debug!("Adding block ht:{} in round {}", b.header.height, cx.round);
-        let commit_round = cx.round - c.num_faults;
-        let commit_block = cx
+        let commit_round = cx.round - c.num_faults as u64;
+        // `delivered_block_from_ht` uses the block's internal height,
+        // which on the apollo client grows 1:1 with the round.
+        let _commit_block = cx
             .storage
             .delivered_block_from_ht(commit_round)
             .unwrap_or_else(|| {
@@ -211,14 +196,22 @@ fn handle_new_blocks(c: &Client, cx: &mut Context, now: SystemTime) {
                 )
             });
 
-        // f+1 rule to commit the block
+        // f+1 rule to commit the block. Tx hashes come from the
+        // server-hydrated `ClientMsg::NewBlock` for the commit round.
         cx.num_cmds += c.block_size as u128;
-        for t in &commit_block.body.tx_hashes {
-            if let Some(old) = cx.time_map.get(t) {
-                cx.latency_map.insert(t.clone(), (*old, now));
-            } else {
-                cx.num_cmds -= 1;
+        if let Some(tx_hashes) = cx.tx_hash_map.remove(&commit_round) {
+            for t in &tx_hashes {
+                if let Some(old) = cx.time_map.get(t) {
+                    cx.latency_map.insert(t.clone(), (*old, now));
+                } else {
+                    cx.num_cmds -= 1;
+                }
             }
+        } else {
+            log::warn!(
+                "No tx hashes stashed for commit round {}; skipping latency update",
+                commit_round
+            );
         }
         cx.round += 1;
     }

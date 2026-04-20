@@ -1,13 +1,27 @@
-use types::apollo::{Block, Propose, ProtocolMsg, Transaction, Replica};
+use libmempool::{Batch, BatchHash};
+use std::sync::Arc;
+use types::apollo::{Block, Propose, ProtocolMsg, Replica, Transaction};
 use types::BlockTrait;
 use super::*;
-use std::sync::Arc;
 
-/// Creates a block using the last seen block as the parent, then proposes it.
-pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
+/// Leader proposes a block wrapping the given batch. Reads the batch
+/// from the local batch store, builds a block that references it by
+/// hash, and broadcasts it (batch inline so followers don't need a
+/// sync round-trip).
+pub async fn do_propose(batch_hash: BatchHash<Transaction>, cx: &mut Context) {
+    let batch = match cx.read_batch(&batch_hash).await {
+        Some(b) => b,
+        None => {
+            log::warn!(
+                "Leader's own batch {:?} missing from store; skipping propose",
+                batch_hash
+            );
+            return;
+        }
+    };
     let parent = cx.last_seen_block.as_ref();
 
-    let mut new_block = Block::with_tx(txs);
+    let mut new_block = Block::with_batch(batch_hash.clone());
     new_block.header.prev = parent.hash.clone();
     new_block.header.author = cx.myid();
     new_block.header.height = parent.header.height + 1;
@@ -18,12 +32,18 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
     p.sig.origin = cx.myid();
     p.sign(cx.my_secret_key.as_ref());
 
-    let msg = Arc::new(ProtocolMsg::NewProposal(p.clone(), new_block.clone()));
+    let msg = Arc::new(ProtocolMsg::NewProposal(
+        p.clone(),
+        new_block.clone(),
+        batch.clone(),
+    ));
     cx.multicast(msg).await;
 
     let block_arc = Arc::new(new_block);
     if cx.is_client_apollo_enabled() {
-        cx.multicast_client(Arc::new(p.clone()), block_arc.clone()).await;
+        let tx_hashes = Context::hydrate_tx_hashes(&batch);
+        cx.multicast_client(Arc::new(p.clone()), block_arc.clone(), tx_hashes)
+            .await;
     }
 
     cx.storage.add_delivered_block(block_arc.clone());
@@ -67,6 +87,20 @@ pub async fn try_receive_proposal(
     on_receive_proposal(Arc::new(p), block, cx).await;
 }
 
+/// Verify that the batch carried in a proposal / response hashes to
+/// what the block commits to.
+pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
+    let serialized = match bincode::serialize(batch) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Failed to serialize batch for hash check: {}", e);
+            return false;
+        }
+    };
+    let computed: BatchHash<Transaction> = libcrypto::hash::Hash::do_hash(&serialized);
+    computed == block.body.batch_hash
+}
+
 /// Called when a proposal has been fully delivered (block + ancestors).
 pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Context) {
     log::debug!("Handling valid proposal: {:?}", p);
@@ -88,11 +122,10 @@ pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Co
     let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), (*p).clone()));
     cx.send(cx.next_leader(), msg).await;
 
-    cx.storage.clear(&block.body.tx_hashes);
     cx.prop_chain_by_hash.insert(p.block_hash.clone(), p.clone());
     cx.prop_chain_by_round.insert(p.round, p.clone());
 
-    if cx.round() > cx.num_faults() {
+    if cx.round() > cx.num_faults() as u64 {
         do_commit(cx).await;
     }
 

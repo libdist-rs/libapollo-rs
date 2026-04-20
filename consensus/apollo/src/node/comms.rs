@@ -1,13 +1,13 @@
-use types::apollo::{ClientMsg, ProtocolMsg, Replica};
+use libcrypto::hash::Hash;
+use types::apollo::{Block, ClientMsg, Propose, ProtocolMsg, Replica, Transaction};
 
 use super::context::Context;
 use std::sync::Arc;
 
 /// Communication logic
-/// Contains three functions
-/// - `Send`      - Send a message to a specific node
-/// - `Multicast` - Send a message to every peer but myself
-/// - `Multicast client` - Send a `ClientMsg` to every registered client
+/// - `Send`      - send a `ProtocolMsg` to a specific node
+/// - `Multicast` - send a `ProtocolMsg` to every peer but myself
+/// - `Multicast client` - send a `ClientMsg` to every registered client
 
 impl Context {
     /// Send a `ProtocolMsg` to a specific peer. Serializes once and
@@ -39,17 +39,20 @@ impl Context {
     }
 
     /// Multicast a committed block (wrapped in a `ClientMsg`) to every
-    /// registered client.
+    /// registered client. `tx_hashes` is hydrated by the caller from
+    /// the block's referenced batch so the client can match commits
+    /// back to its outstanding submissions.
     pub(crate) async fn multicast_client(
         &mut self,
-        p: Arc<types::apollo::Propose>,
-        b: Arc<types::apollo::Block>,
+        p: Arc<Propose>,
+        b: Arc<Block>,
+        tx_hashes: Vec<Hash<Transaction>>,
     ) {
         if self.all_clients.is_empty() {
             return;
         }
         let payload = types::apollo::Payload::with_payload(self.payload);
-        let msg = ClientMsg::NewBlock(p.as_ref().clone(), b.as_ref().clone(), payload);
+        let msg = ClientMsg::NewBlock(p.as_ref().clone(), b.as_ref().clone(), tx_hashes, payload);
         let bytes = bytes::Bytes::from(bincode::serialize(&msg).expect("ClientMsg serialize"));
         let results = self.client_net.broadcast(&self.all_clients, bytes).await;
         for r in results {

@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
-use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::channel;
 use tokio_stream::StreamExt;
 use types::apollo::{Block, ClientMsg, Replica, Transaction};
@@ -20,6 +20,7 @@ struct Context {
     time_map: HashMap<Hash<Transaction>, SystemTime>,
     count_map: HashMap<Hash<Block>, usize>,
     finished_map: HashSet<Hash<Block>>,
+    tx_hash_map: HashMap<Hash<Block>, Vec<Hash<Transaction>>>,
     latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
     num_cmds: u128,
 }
@@ -43,6 +44,7 @@ impl Context {
             time_map: HashMap::default(),
             count_map: HashMap::default(),
             finished_map: HashSet::default(),
+            tx_hash_map: HashMap::default(),
             latency_map: HashMap::default(),
             num_cmds: 0,
         }
@@ -50,14 +52,7 @@ impl Context {
 }
 
 pub async fn start(c: &Client, metric: u64, window: usize) {
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
-
+    // Outgoing tx submission: plaintext TCP into each node's mempool.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -67,20 +62,21 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TlsReliableSender::<Replica, Transaction>::with_peers_and_options(
-        peer_map,
-        tls(),
-    )
-    .expect("tx sender setup");
+    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
 
+    // Incoming `ClientMsg::NewBlock` pushes: still TLS.
+    let tls = || TlsOptions {
+        cert_source: CertSource::PemFiles {
+            cert_chain: PathBuf::from(&c.my_cert_path),
+            private_key: PathBuf::from(&c.my_cert_key_path),
+        },
+        ..TlsOptions::high_throughput()
+    };
     let listen: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
-
-    let mut cancel_handlers: Vec<tls_reliable_sender::CancelHandler> = Vec::new();
-    let handler_budget = 4 * window;
 
     let (send, mut recv) = channel(util::CHANNEL_SIZE);
     let m = metric;
@@ -101,25 +97,14 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
     cx.pending = window;
 
     let start = SystemTime::now();
-    let mut new_blocks: VecDeque<Arc<Block>> = VecDeque::new();
+    let mut new_blocks: VecDeque<(Arc<Block>, Vec<Hash<Transaction>>)> = VecDeque::new();
     loop {
         tokio::select! {
             tx_opt = recv.recv(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
                     let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
                     let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let results = tx_net.broadcast(&all_servers, bytes).await;
-                    for r in results {
-                        if let Ok(h) = r {
-                            cancel_handlers.push(h);
-                        }
-                    }
-                    if cancel_handlers.len() > handler_budget {
-                        cancel_handlers.retain_mut(|h| matches!(
-                            h.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
-                    }
+                    let _ = tx_net.broadcast(&all_servers, bytes).await;
                     cx.time_map.insert(hash, SystemTime::now());
                     cx.pending -= 1;
                     log::trace!("Sending transaction to every server");
@@ -135,15 +120,15 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                     Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
                     None => panic!("server push listener closed"),
                 };
-                let b = match msg {
-                    ClientMsg::NewBlock(_p, b, _) => Arc::new(b),
+                let (b, tx_hashes) = match msg {
+                    ClientMsg::NewBlock(_p, b, tx_hashes, _) => (Arc::new(b), tx_hashes),
                     _ => continue,
                 };
-                new_blocks.push_back(b);
-                while let Some(Ok(ClientMsg::NewBlock(_p, b, _))) =
+                new_blocks.push_back((b, tx_hashes));
+                while let Some(Ok(ClientMsg::NewBlock(_p, b, tx_hashes, _))) =
                     futures::FutureExt::now_or_never(block_recv.next()).flatten()
                 {
-                    new_blocks.push_back(Arc::new(b));
+                    new_blocks.push_back((Arc::new(b), tx_hashes));
                 }
                 process_blocks(c, now, &mut new_blocks, &mut cx);
                 log::debug!("Sending {} commands to the nodes", cx.pending);
@@ -160,13 +145,19 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
 fn process_blocks(
     c: &Client,
     now: SystemTime,
-    new_blocks: &mut VecDeque<Arc<Block>>,
+    new_blocks: &mut VecDeque<(Arc<Block>, Vec<Hash<Transaction>>)>,
     cx: &mut Context,
 ) {
-    log::debug!("Processing new {:?}", new_blocks);
+    log::debug!("Processing new {:?}", new_blocks.len());
     log::debug!("Before processing: {:?}", cx);
-    for b in new_blocks.drain(..) {
-        // Check if the block is valid?
+    for (b, tx_hashes) in new_blocks.drain(..) {
+        // Remember the tx hashes from the first delivery -- other
+        // replicas will resend the same block hash with the same
+        // payload, and the f+1 commit rule matches on block hash.
+        cx.tx_hash_map
+            .entry(b.hash.clone())
+            .or_insert_with(|| tx_hashes);
+
         if !cx.count_map.contains_key(&b.hash) {
             cx.count_map.insert(b.hash.clone(), 1);
             continue;
@@ -181,12 +172,14 @@ fn process_blocks(
         }
         cx.pending += c.block_size;
         cx.num_cmds += c.block_size as u128;
-        for t in &b.body.tx_hashes {
-            if let Some(old) = cx.time_map.get(t) {
-                cx.latency_map.insert(t.clone(), (*old, now));
-            } else {
-                log::warn!("transaction not found in time map");
-                cx.num_cmds -= 1;
+        if let Some(hashes) = cx.tx_hash_map.get(&b.hash) {
+            for t in hashes {
+                if let Some(old) = cx.time_map.get(t) {
+                    cx.latency_map.insert(t.clone(), (*old, now));
+                } else {
+                    log::warn!("transaction not found in time map");
+                    cx.num_cmds -= 1;
+                }
             }
         }
         cx.finished_map.insert(b.hash.clone());

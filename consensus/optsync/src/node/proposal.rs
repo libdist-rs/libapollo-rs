@@ -1,11 +1,12 @@
-use types::KeypairSign;
-use std::collections::HashSet;
 use crate::node::context::Context;
-use types::optsync::{
-    Block, CertType, Certificate, Transaction, Vote,
-    Propose, ProtocolMsg,
-};
+use libcrypto::hash::Hash;
+use libmempool::{Batch, BatchHash};
+use std::collections::HashSet;
 use std::sync::Arc;
+use types::optsync::{
+    Block, CertType, Certificate, ProtocolMsg, Propose, Transaction, Vote,
+};
+use types::KeypairSign;
 
 pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
     if new_block.hash != p.block_hash {
@@ -78,9 +79,24 @@ pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
     true
 }
 
+/// Verify the batch carried in a proposal hashes to the block's
+/// committed `batch_hash`.
+pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
+    let serialized = match bincode::serialize(batch) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Failed to serialize incoming batch for hash check: {}", e);
+            return false;
+        }
+    };
+    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
+    computed == block.body.batch_hash
+}
+
 pub async fn on_receive_proposal(
     p: Arc<Propose>,
     new_block: Arc<Block>,
+    batch: Batch<Transaction>,
     cx: &mut Context,
 ) -> bool {
     log::debug!("Received a proposal: {}", new_block.header.height);
@@ -94,6 +110,13 @@ pub async fn on_receive_proposal(
         log::warn!("Proposal checking failed");
         return false;
     }
+
+    if !check_batch_hash(new_block.as_ref(), &batch) {
+        log::warn!("Batch hash mismatch; dropping proposal");
+        return false;
+    }
+
+    cx.persist_batch(new_block.body.batch_hash.clone(), &batch).await;
 
     on_new_valid_proposal(p, new_block, cx).await
 }
@@ -126,10 +149,7 @@ pub async fn on_new_valid_proposal(
         panic!("Already have a vote: {:?}", x);
     }
 
-    // Update state first so the broadcast stashes handlers under the
-    // correct (post-vote) height.
     cx.storage.add_delivered_block(new_block.clone());
-    cx.storage.clear(&new_block.body.tx_hashes);
     cx.height = new_block.header.height;
     cx.last_seen_block = new_block;
     cx.last_seen_cert = p.cert.clone();
@@ -141,14 +161,28 @@ pub async fn on_new_valid_proposal(
     true
 }
 
-pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
+pub async fn do_propose(
+    batch_hash: BatchHash<Transaction>,
+    cx: &mut Context,
+) -> Option<Arc<Propose>> {
+    let batch = match cx.read_batch(&batch_hash).await {
+        Some(b) => b,
+        None => {
+            log::warn!(
+                "Leader's own batch {:?} missing from store; skipping propose",
+                batch_hash
+            );
+            return None;
+        }
+    };
+
     let parent = cx.last_seen_block.clone();
-    let mut new_block = Block::with_tx(txs);
+    let mut new_block = Block::with_batch(batch_hash.clone());
 
     new_block.header.author = cx.myid;
     new_block.header.prev = parent.hash.clone();
     new_block.header.height = parent.header.height + 1;
-    new_block.hash = new_block.compute_hash();
+    let new_block = new_block.init();
 
     let proof = match cx.my_secret_key.sign(new_block.hash.as_ref()) {
         Err(e) => panic!("Failed to sign the new proposal: {}", e),
@@ -184,9 +218,10 @@ pub async fn do_propose(txs: Vec<Arc<Transaction>>, cx: &mut Context) {
     cx.last_seen_block = new_block_ref.clone();
     cx.last_committed_block_ht = cx.height;
 
-    let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone());
+    let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone(), batch);
     cx.multicast(&msg).await;
 
     let p = Arc::new(p);
-    cx.commit_queue.insert(p, cx.d2);
+    cx.commit_queue.insert(p.clone(), cx.d2);
+    Some(p)
 }

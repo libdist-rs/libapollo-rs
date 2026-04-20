@@ -2,12 +2,17 @@ use bytes::Bytes;
 use config::{ClientId, Node};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::{ed25519, hash::Hash, secp256k1, Keypair, PublicKey};
+use libmempool::{Batch, BatchHash, ConsensusMempoolMsg};
+use libstorage::rocksdb::Storage as RocksStore;
+use std::collections::VecDeque;
 use std::{sync::Arc, time::Duration};
 use tls_reliable_sender::{CancelHandler, TlsReliableSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio_util::time::DelayQueue;
 use types::optsync::{
-    Block, Certificate, ClientMsg, GENESIS_BLOCK, Height, ProtocolMsg, Propose, Replica, Storage, View,
+    Block, Certificate, ClientMsg, Height, ProtocolMsg, Propose, Replica, Storage, Transaction,
+    View, GENESIS_BLOCK,
 };
 
 pub struct Context {
@@ -23,6 +28,14 @@ pub struct Context {
     /// send time. See `gc_handlers`.
     pub consensus_handlers: HashMap<Height, Vec<CancelHandler>>,
     pub client_handlers: HashMap<Height, Vec<CancelHandler>>,
+
+    /// Batch store (libmempool + libstorage-rs path).
+    pub batch_store: RocksStore,
+    /// Batches the mempool has announced as ready; leader pops off
+    /// the front when it proposes.
+    pub pending_batches: VecDeque<BatchHash<Transaction>>,
+    /// Control channel to the mempool.
+    pub tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Height, Transaction>>,
 
     /// Data context
     pub num_nodes: usize,
@@ -49,13 +62,13 @@ pub struct Context {
     pub commit_queue: DelayQueue<Arc<Propose>>,
 }
 
-const EXTRA_SPACE: usize = 10;
-
 impl Context {
     pub fn new(
         config: &Node,
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
         client_net: TlsReliableSender<ClientId, ClientMsg>,
+        batch_store: RocksStore,
+        tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Height, Transaction>>,
     ) -> Self {
         let genesis_arc = Arc::new(GENESIS_BLOCK);
         let broadcast_peers: Vec<Replica> = (0..config.num_nodes as Replica)
@@ -69,6 +82,9 @@ impl Context {
             all_clients,
             consensus_handlers: HashMap::default(),
             client_handlers: HashMap::default(),
+            batch_store,
+            pending_batches: VecDeque::new(),
+            tx_consensus_to_mem,
             num_nodes: config.num_nodes,
             my_secret_key: match config.crypto_alg {
                 libcrypto::Algorithm::ED25519 => {
@@ -87,7 +103,7 @@ impl Context {
             myid: config.id,
             d2: std::time::Duration::from_millis(2 * config.delta),
             num_faults: config.num_faults,
-            storage: Storage::new(EXTRA_SPACE * config.block_size),
+            storage: Storage::new(),
             height: 0,
             last_leader: 0,
             last_seen_block: genesis_arc.clone(),
@@ -131,7 +147,7 @@ impl Context {
 
     /// Leader of a view
     pub fn leader_of_view(&self) -> Replica {
-        (self.view % self.num_nodes) as Replica
+        (self.view as usize % self.num_nodes) as Replica
     }
 
     /// Serialize once and broadcast `msg` to every peer but myself.
@@ -161,6 +177,29 @@ impl Context {
                 Ok(h) => self.remember_client(h),
                 Err(e) => log::warn!("client broadcast leg failed: {:?}", e),
             }
+        }
+    }
+
+    /// Persist an incoming batch so `on_commit` can hydrate it later.
+    pub async fn persist_batch(
+        &mut self,
+        batch_hash: BatchHash<Transaction>,
+        batch: &Batch<Transaction>,
+    ) {
+        let key = batch_hash.as_ref().to_vec();
+        let value = bincode::serialize(batch).expect("Batch serialize");
+        self.batch_store.write(key, value).await;
+    }
+
+    /// Read a batch from storage by hash.
+    pub async fn read_batch(
+        &mut self,
+        batch_hash: &BatchHash<Transaction>,
+    ) -> Option<Batch<Transaction>> {
+        let key = batch_hash.as_ref().to_vec();
+        match self.batch_store.read(key).await {
+            Ok(Some(bytes)) => bincode::deserialize(&bytes).ok(),
+            _ => None,
         }
     }
 

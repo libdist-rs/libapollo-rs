@@ -3,11 +3,16 @@ use config::{ClientId, Node};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
+use libmempool::{Batch, BatchHash, ConsensusMempoolMsg};
+use libstorage::rocksdb::Storage as RocksStore;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tls_reliable_sender::{CancelHandler, TlsReliableSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::error::TryRecvError;
-use types::apollo::{Block, ClientMsg, GENESIS_BLOCK, Propose, ProtocolMsg, Replica, Round, Storage};
+use types::apollo::{
+    Block, ClientMsg, GENESIS_BLOCK, Propose, ProtocolMsg, Replica, Round, Storage, Transaction,
+};
 
 pub struct Context {
     /// Config context
@@ -37,6 +42,19 @@ pub struct Context {
     pub consensus_handlers: HashMap<Round, Vec<CancelHandler>>,
     pub client_handlers: HashMap<Round, Vec<CancelHandler>>,
 
+    /// Batch store shared with the per-node Mempool. Leaders read
+    /// batches out of it when proposing; followers write incoming
+    /// batches in when handling proposals.
+    pub batch_store: RocksStore,
+
+    /// Batches the mempool has announced as ready; the leader pops
+    /// from the front of this on the tick after `round_leader() == myid`.
+    pub pending_batches: VecDeque<BatchHash<Transaction>>,
+
+    /// Control channel to the mempool -- currently only used for
+    /// mempool-synchronizer round-advance notifications.
+    pub tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
+
     // Reordering context: proposals that arrived with their block ride in
     // `prop_buf`; relays arrive block-less and fetch from storage (or
     // request) in `relay_buf`. `future_msgs` parks out-of-order proposals
@@ -44,13 +62,13 @@ pub struct Context {
     // tagged in each entry is the node to ask if a block (or parent) is
     // missing: for NewProposal that's `p.sig.origin` (the leader); for
     // Response/Relay that's the embedded `from` (who just forwarded).
-    pub prop_buf: VecDeque<(Replica, Propose, Block)>,
+    pub prop_buf: VecDeque<(Replica, Propose, Block, Batch<Transaction>)>,
     pub relay_buf: VecDeque<(Replica, Propose)>,
     pub other_buf: VecDeque<ProtocolMsg>,
     pub future_msgs: HashMap<Round, (Replica, Propose)>,
 
-    /// Storage context
-    /// Where the blockchain and transactions are stored
+    /// Storage context -- block index only now; transaction pool lives
+    /// in `libmempool-rs`'s `Mempool` / `Batcher` pipeline.
     pub storage: Storage,
     /// The chain of proposals: Map of block hash to its proposal
     pub prop_chain_by_round: HashMap<Round, Arc<Propose>>,
@@ -73,13 +91,13 @@ pub struct Context {
     pub req_ctr: u64,
 }
 
-const EXTRA_SPACE: usize = 100;
-
 impl Context {
     pub fn new(
         config: &Node,
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
         client_net: TlsReliableSender<ClientId, ClientMsg>,
+        batch_store: RocksStore,
+        tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
         is_apollo_enabled: bool,
     ) -> Self {
         let broadcast_peers: Vec<Replica> = (0..config.num_nodes as Replica)
@@ -111,7 +129,10 @@ impl Context {
             all_clients,
             consensus_handlers: HashMap::default(),
             client_handlers: HashMap::default(),
-            storage: Storage::new(EXTRA_SPACE * config.block_size),
+            batch_store,
+            pending_batches: VecDeque::new(),
+            tx_consensus_to_mem,
+            storage: Storage::new(),
             round_leader: 0,
             round: 1,
             future_msgs: HashMap::default(),
@@ -194,6 +215,41 @@ impl Context {
         } else {
             prev + 1
         }
+    }
+
+    /// Persist an incoming batch into the local batch store. Called
+    /// from the proposal / response paths before voting / delivering.
+    pub async fn persist_batch(
+        &mut self,
+        batch_hash: BatchHash<Transaction>,
+        batch: &Batch<Transaction>,
+    ) {
+        let key = batch_hash.as_ref().to_vec();
+        let value = bincode::serialize(batch).expect("Batch serialize");
+        self.batch_store.write(key, value).await;
+    }
+
+    /// Read a batch from storage by hash.
+    pub async fn read_batch(
+        &mut self,
+        batch_hash: &BatchHash<Transaction>,
+    ) -> Option<Batch<Transaction>> {
+        let key = batch_hash.as_ref().to_vec();
+        match self.batch_store.read(key).await {
+            Ok(Some(bytes)) => bincode::deserialize(&bytes).ok(),
+            _ => None,
+        }
+    }
+
+    /// Compute tx hashes from a batch payload. Leaders feed this into
+    /// `ClientMsg::NewBlock` at propose time (special-client mode);
+    /// followers feed it at commit time.
+    pub fn hydrate_tx_hashes(batch: &Batch<Transaction>) -> Vec<Hash<Transaction>> {
+        batch
+            .payload
+            .iter()
+            .map(|tx| Hash::<Transaction>::ser_and_hash(tx))
+            .collect()
     }
 
     /// Serialize `msg` once and stash the returned handlers under the

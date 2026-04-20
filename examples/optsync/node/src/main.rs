@@ -1,13 +1,20 @@
 use clap::{load_yaml, App};
 use config::{ClientId, Node};
 use fnv::FnvHashMap;
+use libmempool::batcher::Batcher;
+use libmempool::{Config as MempoolConfig, Mempool};
+use libstorage::rocksdb::Storage as RocksStore;
 use net_common::{CertSource, TlsOptions};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
-use types::optsync::{ClientMsg, ProtocolMsg, Replica, Transaction};
+use tokio::sync::mpsc::unbounded_channel;
+use types::optsync::{ClientMsg, Height, ProtocolMsg, Replica, Transaction};
+use types::CountSealer;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let yaml = load_yaml!("cli.yml");
@@ -59,6 +66,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let config = config;
 
+    let rocksdb_path = m
+        .value_of("store")
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let parent = conf_file
+                .parent()
+                .expect("config file has no parent dir");
+            parent
+                .join(format!("node-{}.rocksdb", config.id))
+                .to_string_lossy()
+                .into_owned()
+        });
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -72,6 +92,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             ..TlsOptions::high_throughput()
         };
+
+        let batch_store = RocksStore::new(&rocksdb_path).expect("rocksdb store init");
 
         let consensus_listen: SocketAddr = config
             .my_ip()
@@ -96,12 +118,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .expect("consensus sender setup");
 
-        let client_listen: SocketAddr = config
-            .client_ip()
-            .parse()
-            .expect("failed to parse client-facing listen addr");
-        let tx_recv = TlsReceiver::<Transaction>::spawn_with_options(client_listen, tls());
-
         let mut client_map: FnvHashMap<ClientId, SocketAddr> = FnvHashMap::default();
         for (&id, addr) in &config.client_net_map {
             client_map.insert(
@@ -116,10 +132,75 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .expect("client sender setup");
 
+        let mut mempool_peer_map: FnvHashMap<Replica, SocketAddr> = FnvHashMap::default();
+        for (&id, addr) in &config.mempool_net_map {
+            if id == config.id {
+                continue;
+            }
+            mempool_peer_map.insert(
+                id,
+                addr.parse()
+                    .unwrap_or_else(|_| panic!("invalid mempool addr for {}: {}", id, addr)),
+            );
+        }
+        let mempool_sender = TcpSimpleSender::with_peers(mempool_peer_map);
+
+        let (tx_consensus_to_mem, rx_consensus_to_mem) =
+            unbounded_channel::<libmempool::ConsensusMempoolMsg<Replica, Height, Transaction>>();
+        let (tx_batcher, rx_batcher) = unbounded_channel();
+        let (tx_processor, rx_processor) = unbounded_channel();
+        let (tx_mem_to_consensus, rx_mem_to_consensus) = unbounded_channel();
+
+        Batcher::spawn(
+            rx_batcher,
+            tx_processor.clone(),
+            CountSealer::<Transaction>::new(config.block_size),
+        );
+
+        let all_ids: Vec<Replica> = (0..config.num_nodes as Replica).collect();
+        let mempool_params = MempoolConfig::<Height> {
+            gc_depth: 50,
+            sync_retry_delay: Duration::from_millis(100),
+            sync_retry_nodes: 3,
+        };
+
+        let mempool_addr: SocketAddr = config
+            .mempool_ip()
+            .parse()
+            .expect("failed to parse mempool listen addr");
+        let client_addr: SocketAddr = config
+            .client_ip()
+            .parse()
+            .expect("failed to parse mempool client-facing addr");
+
+        Mempool::<Replica, Height, RocksStore, Transaction>::spawn(
+            config.id,
+            all_ids,
+            mempool_params,
+            batch_store.clone(),
+            mempool_sender,
+            rx_consensus_to_mem,
+            tx_batcher,
+            tx_processor,
+            rx_processor,
+            tx_mem_to_consensus,
+            mempool_addr,
+            client_addr,
+        );
+
         let sleep_time = unsafe { config::SLEEP_TIME };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
 
-        optsync::node::reactor(&config, consensus_net, consensus_recv, client_net, tx_recv).await;
+        optsync::node::reactor(
+            &config,
+            consensus_net,
+            consensus_recv,
+            client_net,
+            batch_store,
+            rx_mem_to_consensus,
+            tx_consensus_to_mem,
+        )
+        .await;
     });
     Ok(())
 }

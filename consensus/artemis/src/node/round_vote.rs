@@ -32,7 +32,7 @@ pub async fn do_round_vote(cx: &mut Context) {
     // Multicast the vote
     let msg = Arc::new(ProtocolMsg::UCRVote(v.clone()));
     cx.multicast(msg).await;
-    let mut block_vec = VecDeque::new();
+    let mut block_vec: VecDeque<Block> = VecDeque::new();
     let mut tail = v.hash.clone();
     while cx.last_voted_block.get_hash() != tail {
         let b = cx.storage.delivered_block_from_hash(&tail).expect("Failed to get block");
@@ -41,10 +41,23 @@ pub async fn do_round_vote(cx: &mut Context) {
             .expect("hash is exactly 32 bytes");
     }
     let payload_size = cx.payload;
-    let block_vec = block_vec.into_iter().map(|b| {
-        (b, Payload::with_payload(payload_size))
-    }).collect();
-    let msg = Arc::new(ClientMsg::NewBlock(v.clone(), block_vec));
+    // Hydrate each block's batch from the store; skip any for which
+    // the batch is missing rather than failing the whole notification.
+    let mut hydrated = Vec::with_capacity(block_vec.len());
+    for b in block_vec {
+        let tx_hashes = match cx.read_batch(&b.blk.body.batch_hash).await {
+            Some(batch) => Context::hydrate_tx_hashes(&batch),
+            None => {
+                log::warn!(
+                    "Missing batch {:?} at round-vote commit time; pushing empty hashes",
+                    b.blk.body.batch_hash
+                );
+                Vec::new()
+            }
+        };
+        hydrated.push((b, tx_hashes, Payload::with_payload(payload_size)));
+    }
+    let msg = Arc::new(ClientMsg::NewBlock(v.clone(), hydrated));
     cx.multicast_client(msg).await;
     // Process self vote
     on_receive_round_vote(cx, v).await;
@@ -104,7 +117,7 @@ pub async fn on_receive_round_vote(cx:&mut Context, ucr_vote: UCRVote) {
 
     cx.vote_chain.insert(ucr_vote.round, Arc::new(ucr_vote.clone()));
 
-    if cx.round() > cx.num_faults() {
+    if cx.round() > cx.num_faults() as u64 {
         do_commit(cx);
     }
 

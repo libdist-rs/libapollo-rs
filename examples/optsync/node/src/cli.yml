@@ -28,3 +28,8 @@ args:
         long: sleep
         help: the initial sleep time (in seconds) to ensure that all the other nodes are up and ready for the protocol
         takes_value: true
+    - store:
+        short: s
+        long: store
+        help: directory for the libmempool batch store (rocksdb); defaults to `<config-dir>/node-<id>.rocksdb`
+        takes_value: true

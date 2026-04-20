@@ -488,9 +488,14 @@ async fn main() -> Result<(), BoxErr> {
     // Sanity-check binaries so the first failure is informative, not a cryptic ENOENT.
     for bin in &[
         "genconfig",
-        // Per-protocol node/client binaries are checked at run time
-        // so partial migrations (e.g. `PROTO=synchs` while apollo is
-        // still being ported) don't fail here.
+        "node-apollo",
+        "client-apollo",
+        "node-artemis",
+        "client-artemis",
+        "node-synchs",
+        "client-synchs",
+        "node-optsync",
+        "client-optsync",
     ] {
         let p = repo_root.join(format!("target/release/{}", bin));
         if !p.exists() {

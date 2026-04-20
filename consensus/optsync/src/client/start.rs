@@ -8,21 +8,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
-use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::channel;
 use tokio_stream::StreamExt;
 use types::optsync::{Block, ClientMsg, Replica, Transaction};
 
 pub async fn start(c: &Client, metric: u64, window: usize) {
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
-
+    // Outgoing tx submission: plaintext TCP into each node's mempool.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -32,20 +25,21 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TlsReliableSender::<Replica, Transaction>::with_peers_and_options(
-        peer_map,
-        tls(),
-    )
-    .expect("tx sender setup");
+    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
 
+    // Incoming `ClientMsg` pushes: still TLS.
+    let tls = || TlsOptions {
+        cert_source: CertSource::PemFiles {
+            cert_chain: PathBuf::from(&c.my_cert_path),
+            private_key: PathBuf::from(&c.my_cert_key_path),
+        },
+        ..TlsOptions::high_throughput()
+    };
     let listen: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
-
-    let mut cancel_handlers: Vec<tls_reliable_sender::CancelHandler> = Vec::new();
-    let handler_budget = 4 * window;
 
     let (send, mut recv) = channel(util::CHANNEL_SIZE);
     let m = metric;
@@ -61,6 +55,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
             }
         }
     });
+
     let mut pending = window;
     let mut time_map: HashMap<Hash<Transaction>, SystemTime> = HashMap::default();
     let mut count_map: HashMap<Hash<Block>, usize> = HashMap::default();
@@ -75,18 +70,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                 if let Some(x) = tx_opt {
                     let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
                     let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let results = tx_net.broadcast(&all_servers, bytes).await;
-                    for r in results {
-                        if let Ok(h) = r {
-                            cancel_handlers.push(h);
-                        }
-                    }
-                    if cancel_handlers.len() > handler_budget {
-                        cancel_handlers.retain_mut(|h| matches!(
-                            h.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
-                    }
+                    let _ = tx_net.broadcast(&all_servers, bytes).await;
                     time_map.insert(hash, SystemTime::now());
                     pending -= 1;
                 } else {
@@ -96,7 +80,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
             },
             block_opt = block_recv.next() => {
                 match block_opt {
-                    Some(Ok(ClientMsg::NewBlock(b, _))) => {
+                    Some(Ok(ClientMsg::NewBlock(b, tx_hashes, _))) => {
                         let entry = count_map.entry(b.hash.clone()).or_insert(0);
                         *entry += 1;
                         if *entry < c.num_faults + 1 {
@@ -108,7 +92,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
                         let now = SystemTime::now();
                         pending += c.block_size;
                         num_cmds += c.block_size as u128;
-                        for t in &b.body.tx_hashes {
+                        for t in &tx_hashes {
                             if let Some(old) = time_map.get(t) {
                                 latency_map.insert(t.clone(), (*old, now));
                             } else {

@@ -24,10 +24,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "apollo"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libcrypto",
+ "libmempool-rs",
+ "libstorage-rs",
+ "log",
+ "priority-queue",
+ "serde",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "types",
+ "util",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
+name = "artemis"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libcrypto",
+ "libmempool-rs",
+ "libstorage-rs",
+ "linked-hash-map",
+ "log",
+ "priority-queue",
+ "serde",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "types",
+ "util",
+]
 
 [[package]]
 name = "asn1_der"
@@ -52,7 +107,7 @@ version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.1.19",
  "libc",
  "winapi",
 ]
@@ -237,6 +292,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "client-apollo"
+version = "0.1.0"
+dependencies = [
+ "apollo",
+ "clap",
+ "config",
+ "consensus",
+ "log",
+ "simple_logger 5.2.0",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
+name = "client-artemis"
+version = "0.1.0"
+dependencies = [
+ "artemis",
+ "clap",
+ "config",
+ "consensus",
+ "log",
+ "simple_logger 1.16.0",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
+name = "client-optsync"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "config",
+ "consensus",
+ "log",
+ "optsync",
+ "simple_logger 1.16.0",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
 name = "client-synchs"
 version = "0.1.0"
 dependencies = [
@@ -244,7 +344,7 @@ dependencies = [
  "config",
  "consensus",
  "log",
- "simple_logger",
+ "simple_logger 5.2.0",
  "synchs",
  "tokio",
  "types",
@@ -258,6 +358,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "colored"
+version = "1.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a5f741c91823341bebf717d4c71bda820630ce065443b58bd1b7451af008355"
+dependencies = [
+ "is-terminal",
+ "lazy_static",
+ "winapi",
 ]
 
 [[package]]
@@ -713,6 +824,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hermit-abi"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+
+[[package]]
 name = "hmac"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -751,6 +868,17 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.0",
+]
+
+[[package]]
+name = "is-terminal"
+version = "0.4.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
+dependencies = [
+ "hermit-abi 0.5.2",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -798,6 +926,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
 name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -818,7 +952,7 @@ dependencies = [
  "rand",
  "ring 0.16.20",
  "serde",
- "sha2 0.9.9",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1034,6 +1168,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-apollo"
+version = "0.1.0"
+dependencies = [
+ "apollo",
+ "clap",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libmempool-rs",
+ "libstorage-rs",
+ "log",
+ "simple_logger 5.2.0",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
+name = "node-artemis"
+version = "0.1.0"
+dependencies = [
+ "artemis",
+ "clap",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libmempool-rs",
+ "libstorage-rs",
+ "log",
+ "simple_logger 1.16.0",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
+name = "node-optsync"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libmempool-rs",
+ "libstorage-rs",
+ "log",
+ "optsync",
+ "simple_logger 1.16.0",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "types",
+ "util",
+]
+
+[[package]]
 name = "node-synchs"
 version = "0.1.0"
 dependencies = [
@@ -1046,7 +1249,7 @@ dependencies = [
  "libmempool-rs",
  "libstorage-rs",
  "log",
- "simple_logger",
+ "simple_logger 5.2.0",
  "synchs",
  "tcp-sender",
  "tls-receiver",
@@ -1064,6 +1267,20 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "normal-client-apollo"
+version = "0.1.0"
+dependencies = [
+ "apollo",
+ "clap",
+ "config",
+ "consensus",
+ "log",
+ "simple_logger 1.16.0",
+ "tokio",
+ "util",
 ]
 
 [[package]]
@@ -1129,6 +1346,33 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "optsync"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "common",
+ "config",
+ "consensus",
+ "fnv",
+ "futures",
+ "libcrypto",
+ "libmempool-rs",
+ "libstorage-rs",
+ "log",
+ "priority-queue",
+ "serde",
+ "tcp-sender",
+ "tls-receiver",
+ "tls-reliable-sender",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "types",
+ "util",
 ]
 
 [[package]]
@@ -1556,11 +1800,24 @@ dependencies = [
 
 [[package]]
 name = "simple_logger"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45b60258a35dc3cb8a16890b8fd6723349bfa458d7960e25e633f1b1c19d7b5e"
+dependencies = [
+ "atty",
+ "colored 1.9.4",
+ "log",
+ "time",
+ "winapi",
+]
+
+[[package]]
+name = "simple_logger"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7038d0e96661bf9ce647e1a6f6ef6d6f3663f66d9bf741abf14ba4876071c17"
 dependencies = [
- "colored",
+ "colored 3.1.1",
  "log",
  "time",
  "windows-sys 0.61.2",

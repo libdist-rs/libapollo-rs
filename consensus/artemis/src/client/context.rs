@@ -2,9 +2,11 @@ use config::Client;
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use std::{sync::Arc, convert::TryInto};
-use types::artemis::{Block, GENESIS_BLOCK, Payload, Round, Storage, Transaction, UCRVote, Replica};
+use types::artemis::{Block, GENESIS_BLOCK, Round, Storage, Transaction, UCRVote, Replica};
 use std::time::SystemTime;
 use linked_hash_map::LinkedHashMap;
+
+use super::DeliveredBlock;
 
 pub(crate) struct Context {
     /// The config for this instance of the protocol
@@ -13,10 +15,15 @@ pub(crate) struct Context {
     pub pending: usize,
     /// The number of committed commands
     pub num_cmds: u128,
-    /// `time_map` contains (h, t) holds the time `t` at which we sent the transaction with `h` 
+    /// `time_map` contains (h, t) holds the time `t` at which we sent the transaction with `h`
     pub time_map: HashMap<Hash<Transaction>, SystemTime>,
     /// The latency map contains the (start time, end time) for every transaction with hash `h`
     pub latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
+    /// Server-hydrated tx hashes keyed by block hash. Populated on
+    /// `NewBlock` delivery so the commit loop can settle latencies
+    /// without reaching into `block.body.tx_hashes` (which no longer
+    /// exists post-libmempool).
+    pub tx_hash_map: HashMap<Hash<Block>, Vec<Hash<Transaction>>>,
     /// To hold all of our blocks
     pub storage: Storage,
     /// Prop chain
@@ -26,10 +33,10 @@ pub(crate) struct Context {
     /// The current round leader
     pub round_leader: Replica,
     /// Future messages
-    pub future_msgs: HashMap<Round, (UCRVote, Vec<(Block, Payload)>)>,
+    pub future_msgs: HashMap<Round, (UCRVote, Vec<DeliveredBlock>)>,
 
     /// The last f leaders
-    last_f_leaders: LinkedHashMap<Replica,()>,
+    last_f_leaders: LinkedHashMap<Replica, ()>,
     /// Eligible leaders
     eligible_leaders: Vec<Replica>,
 }
@@ -42,7 +49,8 @@ impl Context {
             num_cmds: 0,
             time_map: HashMap::default(),
             latency_map: HashMap::default(),
-            storage: Storage::new(100_000),
+            tx_hash_map: HashMap::default(),
+            storage: Storage::new(),
             round: 1,
             prop_chain:HashMap::default(),
             round_leader:(config.num_faults-1) as Replica,

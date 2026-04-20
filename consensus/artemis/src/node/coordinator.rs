@@ -1,44 +1,63 @@
-use std::convert::TryFrom;
 use libcrypto::hash::Hash;
-use types::{BlockTrait, artemis::{Block, ProtocolMsg, Transaction}};
-use super::context::Context;
+use libmempool::{Batch, BatchHash};
+use std::convert::TryFrom;
 use std::sync::Arc;
+use types::{
+    artemis::{Block, ProtocolMsg, Transaction},
+    BlockTrait,
+};
 
-/// Dispatch block is called by the view leader to create candidate blocks and send it to all the nodes
-pub async fn do_new_block(txs: Vec<Arc<Transaction>>, cx:&mut Context)
-{
+use super::context::Context;
+
+/// View leader dispatches a new block referencing `batch_hash`. Reads
+/// the corresponding batch from the local store and broadcasts
+/// `NewBlock(block, batch)` so followers can persist it and vote
+/// without a separate sync round-trip.
+pub async fn do_new_block(batch_hash: BatchHash<Transaction>, cx: &mut Context) {
+    let batch = match cx.read_batch(&batch_hash).await {
+        Some(b) => b,
+        None => {
+            log::warn!(
+                "Leader's own batch {:?} missing from store; skipping new block",
+                batch_hash
+            );
+            return;
+        }
+    };
+
     log::debug!("View leader dispatching a block");
-    let mut new_block = Block::with_tx(txs);
-    // last_seen_block.get_hash() is Hash<artemis::Block>; the inner header's
-    // `prev` is typed as Hash<types::Block>. The bytes are identical -- the
-    // phantom type is the only difference, so re-tag via `try_from`.
+    let mut new_block = Block::with_batch(batch_hash.clone());
+    // last_seen_block.get_hash() is Hash<artemis::Block>; the inner
+    // header's `prev` is typed as Hash<types::Block>. The bytes are
+    // identical -- the phantom type is the only difference, so
+    // re-tag via `try_from`.
     let parent_hash = cx.last_seen_block.get_hash();
     new_block.blk.header.prev =
         libcrypto::hash::Hash::try_from(parent_hash.as_ref())
             .expect("hash is exactly 32 bytes");
     new_block.blk.header.author = cx.myid();
-    new_block.blk.header.height = cx.last_seen_block.get_height()+1;
+    new_block.blk.header.height = cx.last_seen_block.get_height() + 1;
     new_block.sig.origin = cx.myid();
     let mut new_block = new_block.init();
     new_block.sign(&cx.my_secret_key);
-    
-    // Send this new block to everyone
-    let msg = Arc::new(ProtocolMsg::NewBlock(new_block.clone()));
-    cx.multicast(msg.clone()).await;
-    log::debug!("Broadcasting new blocks to all the nodes");
-    
-    // Process this new block
+
+    let msg = Arc::new(ProtocolMsg::NewBlock(new_block.clone(), batch));
+    cx.multicast(msg).await;
+    log::debug!("Broadcasting new block to all the nodes");
+
     on_receive_new_block_direct(cx, new_block).await;
 }
 
-/// `on_recv_new_block_direct` is called when we get a new block from the view co-ordinator (directly)
-/// A Byzantine node may deliver out-of-order blocks; Discard a block that does not extend the block that it sent last
-pub async fn on_receive_new_block_direct(cx:&mut Context, blk: Block) {
+/// `on_recv_new_block_direct` is called when we get a new block from
+/// the view co-ordinator (directly). A Byzantine node may deliver
+/// out-of-order blocks; discard a block that does not extend the
+/// block that it sent last.
+pub async fn on_receive_new_block_direct(cx: &mut Context, blk: Block) {
     log::debug!("Got a new block from the view leader: {:?}", blk);
     if cx.storage.is_delivered_by_hash(&blk.get_hash()) {
         return;
     }
-    
+
     // Check if the parent is delivered. `blk.blk.header.prev` is
     // `Hash<types::Block>`; Storage is keyed by `Hash<artemis::Block>`, so
     // re-tag via `try_from`.
@@ -50,56 +69,70 @@ pub async fn on_receive_new_block_direct(cx:&mut Context, blk: Block) {
     }
     // Check if the origin fields are correct
     if cx.view_leader != blk.get_author() || cx.view_leader != blk.sig.origin {
-        log::warn!("Got an invalid block. Expected block from the view leader ({}), got a block from {} with sig from {}", cx.view_leader, blk.get_author(), blk.sig.origin);
+        log::warn!(
+            "Got an invalid block. Expected block from the view leader ({}), got a block from {} with sig from {}",
+            cx.view_leader,
+            blk.get_author(),
+            blk.sig.origin
+        );
         return;
     }
-    // Check if this is signed correctly
-    // Ignore checking signature if I signed it myself
-    if cx.view_leader != cx.myid() && !blk.check_sig(cx.pub_key_map.get(&cx.view_leader).expect("Must have this node's pubkey")) {
+    if cx.view_leader != cx.myid()
+        && !blk.check_sig(
+            cx.pub_key_map
+                .get(&cx.view_leader)
+                .expect("Must have this node's pubkey"),
+        )
+    {
         log::warn!("Got an invalid signature");
         return;
     }
     log::debug!("Successfully dealt with the view leader's block: {:?}", blk);
-    // We have a valid signed and delivered block
-    do_delivery(blk,cx);
-    
+    do_delivery(blk, cx);
 }
 
-pub fn do_delivery(blk: Block, cx:&mut Context) {
+/// Verify that a batch carried in `ProtocolMsg::NewBlock` /
+/// `ProtocolMsg::Response` hashes to the block's referenced
+/// `batch_hash`.
+pub fn check_batch_hash(blk: &Block, batch: &Batch<Transaction>) -> bool {
+    let serialized = match bincode::serialize(batch) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Failed to serialize batch for hash check: {}", e);
+            return false;
+        }
+    };
+    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
+    computed == blk.blk.body.batch_hash
+}
+
+pub fn do_delivery(blk: Block, cx: &mut Context) {
     // Add it to storage
     let b_hash = blk.get_hash();
     let b_rc = Arc::new(blk);
     cx.storage.add_delivered_block(b_rc.clone());
-    // We have a new delivered block
     if cx.last_seen_block.get_height() < b_rc.get_height() {
         cx.last_seen_block = b_rc;
     }
-    
-    // If this was undelivered remove it
+
     cx.undelivered_blocks.remove(&b_hash);
-    
-    // Check if any vote gets delivered because this block got delivered
+
     if let Some(v) = cx.vote_waiting.remove(&b_hash) {
         cx.vote_ready.insert(v.round, v);
     }
-    
+
     let mut b_hash = b_hash;
-    // If some block was waiting for this block to be delivered
     while let Some(child) = cx.block_parent_waiting.remove(&b_hash) {
-        // This block may trigger delivery of children
         if let Some(b) = cx.undelivered_blocks.remove(&child) {
-            // We have a new delivered block
             let b_rc = Arc::new(b);
             cx.storage.add_delivered_block(b_rc.clone());
             if cx.last_seen_block.get_height() < b_rc.get_height() {
                 cx.last_seen_block = b_rc;
             }
         }
-        // Check if any vote gets delivered because this block got delivered
         if let Some(v) = cx.vote_waiting.remove(&child) {
             cx.vote_ready.insert(v.round, v);
         }
-        // Repeat these steps with the block (child) that was waiting for this block
         b_hash = child;
     }
-} 
+}

@@ -3,14 +3,18 @@ use config::{ClientId, Node};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
+use libmempool::{Batch, BatchHash, ConsensusMempoolMsg};
+use libstorage::rocksdb::Storage as RocksStore;
 use linked_hash_map::LinkedHashMap;
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::sync::Arc;
 use tls_reliable_sender::{CancelHandler, TlsReliableSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::error::TryRecvError;
 use types::artemis::{
-    Block, ClientMsg, GENESIS_BLOCK, ProtocolMsg, Replica, Round, Storage, UCRVote, View,
+    Block, ClientMsg, GENESIS_BLOCK, ProtocolMsg, Replica, Round, Storage, Transaction, UCRVote,
+    View,
 };
 
 /// Config context
@@ -42,8 +46,15 @@ pub struct Context {
     pub consensus_handlers: HashMap<Round, Vec<CancelHandler>>,
     pub client_handlers: HashMap<Round, Vec<CancelHandler>>,
 
-    /// Storage context. Permanent storage goes here.
-    /// The blockchain and transactions are stored here.
+    /// Batch store shared with the per-node Mempool.
+    pub batch_store: RocksStore,
+    /// Batches the mempool has announced as ready, waiting for the
+    /// current view leader to propose.
+    pub pending_batches: VecDeque<BatchHash<Transaction>>,
+    /// Control channel to the mempool.
+    pub tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
+
+    /// Storage context. Post-libmempool this is a block index only.
     pub storage: Storage,
     /// The vote chain: Map of block hash to its proposal
     pub vote_chain: HashMap<Round, Arc<UCRVote>>,
@@ -74,8 +85,8 @@ pub struct Context {
     // Stuff related to message reordering
     pub vote_waiting: HashMap<Hash<Block>, UCRVote>,
     pub vote_ready: HashMap<Round, UCRVote>,
-    pub block_processing_waiting: VecDeque<Block>,
-    pub response_waiting: VecDeque<(Replica, Block)>,
+    pub block_processing_waiting: VecDeque<(Block, Batch<Transaction>)>,
+    pub response_waiting: VecDeque<(Replica, Block, Batch<Transaction>)>,
     pub other_buf: VecDeque<ProtocolMsg>,
 
     /// Block waiting (hash1, hash2)
@@ -84,13 +95,13 @@ pub struct Context {
     pub undelivered_blocks: HashMap<Hash<Block>, Block>,
 }
 
-const EXTRA_SPACE: usize = 100;
-
 impl Context {
     pub fn new(
         config: &Node,
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
         client_net: TlsReliableSender<ClientId, ClientMsg>,
+        batch_store: RocksStore,
+        tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
         apollo_enabled: bool,
     ) -> Self {
         let genesis_arc = Arc::new(GENESIS_BLOCK);
@@ -122,7 +133,10 @@ impl Context {
             all_clients,
             consensus_handlers: HashMap::default(),
             client_handlers: HashMap::default(),
-            storage: Storage::new(EXTRA_SPACE * config.block_size),
+            batch_store,
+            pending_batches: VecDeque::new(),
+            tx_consensus_to_mem,
+            storage: Storage::new(),
             view_leader: 0,
             round_leader: (config.num_faults - 1) as Replica,
             last_f_leaders: LinkedHashMap::with_capacity(config.num_nodes),
@@ -255,5 +269,39 @@ impl Context {
     #[inline]
     pub(crate) fn serialize_proto(msg: &ProtocolMsg) -> Bytes {
         Bytes::from(bincode::serialize(msg).expect("ProtocolMsg serialize"))
+    }
+
+    /// Persist an incoming batch into the local batch store.
+    pub async fn persist_batch(
+        &mut self,
+        batch_hash: BatchHash<Transaction>,
+        batch: &Batch<Transaction>,
+    ) {
+        let key = batch_hash.as_ref().to_vec();
+        let value = bincode::serialize(batch).expect("Batch serialize");
+        self.batch_store.write(key, value).await;
+    }
+
+    /// Read a batch from the store by hash.
+    pub async fn read_batch(
+        &mut self,
+        batch_hash: &BatchHash<Transaction>,
+    ) -> Option<Batch<Transaction>> {
+        let key = batch_hash.as_ref().to_vec();
+        match self.batch_store.read(key).await {
+            Ok(Some(bytes)) => bincode::deserialize(&bytes).ok(),
+            _ => None,
+        }
+    }
+
+    /// Hydrate per-tx hashes from a batch. Used to fill in the
+    /// hashes field of `ClientMsg::NewBlock` so the client's latency
+    /// tracker can match commits to its outstanding submissions.
+    pub fn hydrate_tx_hashes(batch: &Batch<Transaction>) -> Vec<Hash<Transaction>> {
+        batch
+            .payload
+            .iter()
+            .map(|tx| Hash::<Transaction>::ser_and_hash(tx))
+            .collect()
     }
 }

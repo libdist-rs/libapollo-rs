@@ -2,14 +2,15 @@ use bytes::Bytes;
 use config::Client;
 use consensus::statistics;
 use fnv::FnvHashMap as HashMap;
+use libcrypto::hash::Hash;
 use net_common::{CertSource, TlsOptions};
 use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
-use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio_stream::StreamExt;
 use types::artemis::{Block, ClientMsg, Payload, Replica, Transaction, UCRVote};
@@ -36,15 +37,13 @@ async fn setup_tx_factory(payload: usize) -> TxFactory {
     recv
 }
 
-pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
+/// Artemis's `ClientMsg::NewBlock` carries a tuple per block -- the
+/// block, server-hydrated tx hashes, and a payload. This alias names
+/// the tuple once to keep the wider signatures readable.
+pub type DeliveredBlock = (Block, Vec<Hash<Transaction>>, Payload);
 
+pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
+    // Outgoing tx submission: plaintext TCP into each node's mempool.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -54,20 +53,21 @@ pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TlsReliableSender::<Replica, Transaction>::with_peers_and_options(
-        peer_map,
-        tls(),
-    )
-    .expect("tx sender setup");
+    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
 
+    // Incoming `ClientMsg::NewBlock` pushes: still TLS.
+    let tls = || TlsOptions {
+        cert_source: CertSource::PemFiles {
+            cert_chain: PathBuf::from(&c.my_cert_path),
+            private_key: PathBuf::from(&c.my_cert_key_path),
+        },
+        ..TlsOptions::high_throughput()
+    };
     let listen: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
-
-    let mut cancel_handlers: Vec<tls_reliable_sender::CancelHandler> = Vec::new();
-    let handler_budget = 4 * window;
 
     let payload = c.payload;
     let mut cx = Context::new(c.clone());
@@ -81,20 +81,9 @@ pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
         tokio::select! {
             tx_opt = recv.recv(), if cx.pending > 0 => {
                 if let Some(x) = tx_opt {
-                    let hash = libcrypto::hash::Hash::<Transaction>::ser_and_hash(x.as_ref());
+                    let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
                     let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let results = tx_net.broadcast(&all_servers, bytes).await;
-                    for r in results {
-                        if let Ok(h) = r {
-                            cancel_handlers.push(h);
-                        }
-                    }
-                    if cancel_handlers.len() > handler_budget {
-                        cancel_handlers.retain_mut(|h| matches!(
-                            h.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
-                    }
+                    let _ = tx_net.broadcast(&all_servers, bytes).await;
                     cx.time_map.insert(hash, SystemTime::now());
                     cx.pending -= 1;
                 } else {
@@ -131,7 +120,7 @@ pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
 /// We got a new vote message. Check if we are in the correct round and then process it.
 async fn try_new_round(
     v: UCRVote,
-    block_vec: Vec<(Block, Payload)>,
+    block_vec: Vec<DeliveredBlock>,
     cx: &mut Context,
     ts: SystemTime,
 ) {
@@ -163,22 +152,25 @@ async fn try_new_round(
 /// Processing votes for the correct round
 async fn new_round(
     v: UCRVote,
-    block_vec: Vec<(Block, Payload)>,
+    block_vec: Vec<DeliveredBlock>,
     cx: &mut Context,
     ts: SystemTime,
 ) {
-    for (b, _) in block_vec {
-        cx.pending += b.blk.body.tx_hashes.len();
+    for (b, tx_hashes, _) in block_vec {
+        cx.pending += tx_hashes.len();
+        // Stash per-block tx hashes keyed by `Hash<artemis::Block>`
+        // (the `get_hash` bytes) so the commit loop can look them up.
+        cx.tx_hash_map.insert(b.get_hash(), tx_hashes);
         cx.storage.add_delivered_block(Arc::new(b));
     }
     let v = Arc::new(v);
     cx.prop_chain.insert(v.round, v.clone());
-    if v.round <= cx.config.num_faults {
+    if v.round <= cx.config.num_faults as u64 {
         cx.update_round();
         return;
     }
 
-    let com_round = v.round - cx.config.num_faults;
+    let com_round = v.round - cx.config.num_faults as u64;
     let v = cx.prop_chain.get(&com_round).expect("Must have in prop map");
 
     let mut com_hash = v.hash.clone();
@@ -188,14 +180,17 @@ async fn new_round(
             .delivered_block_from_hash(&com_hash)
             .expect("Trying to commit an undelivered block");
         cx.storage.add_committed_block(b_rc.clone());
-        com_hash = libcrypto::hash::Hash::<Block>::try_from(b_rc.blk.header.prev.as_ref())
-            .expect("hash is exactly 32 bytes");
-        for tx_hash in &b_rc.blk.body.tx_hashes {
-            if let Some(start) = cx.time_map.remove(tx_hash) {
-                cx.num_cmds += 1;
-                cx.latency_map.insert(tx_hash.clone(), (start, ts));
+        let next_hash =
+            Hash::<Block>::try_from(b_rc.blk.header.prev.as_ref()).expect("hash is exactly 32 bytes");
+        if let Some(hashes) = cx.tx_hash_map.remove(&com_hash) {
+            for tx_hash in &hashes {
+                if let Some(start) = cx.time_map.remove(tx_hash) {
+                    cx.num_cmds += 1;
+                    cx.latency_map.insert(tx_hash.clone(), (start, ts));
+                }
             }
         }
+        com_hash = next_hash;
     }
 
     cx.update_round();

@@ -6,10 +6,13 @@ use super::{buffer_message, context::Context, do_new_block, process_message};
 use crate::node::round_vote::try_round_vote;
 use config::{ClientId, Node};
 use futures::future::FutureExt;
+use libmempool::{BatchHash, ConsensusMempoolMsg};
+use libstorage::rocksdb::Storage as RocksStore;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::StreamExt;
-use types::artemis::{ClientMsg, ProtocolMsg, Replica, Transaction};
+use types::artemis::{ClientMsg, ProtocolMsg, Replica, Round, Transaction};
 
 pub async fn reactor(
     config: &Node,
@@ -17,10 +20,18 @@ pub async fn reactor(
     consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
     client_net: TlsReliableSender<ClientId, ClientMsg>,
-    mut tx_recv: TlsReceiver<Transaction>,
+    batch_store: RocksStore,
+    mut rx_mem_to_consensus: UnboundedReceiver<BatchHash<Transaction>>,
+    tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
 ) {
-    let mut cx = Context::new(config, consensus_net, client_net, is_client_apollo_enabled);
-    let block_size = config.block_size;
+    let mut cx = Context::new(
+        config,
+        consensus_net,
+        client_net,
+        batch_store,
+        tx_consensus_to_mem,
+        is_client_apollo_enabled,
+    );
     let myid = config.id;
 
     loop {
@@ -43,27 +54,25 @@ pub async fn reactor(
                 }
                 process_message(&mut cx).await;
             },
-            tx_opt = tx_recv.next() => {
-                match tx_opt {
-                    None => break,
-                    Some(Err(e)) => {
-                        log::warn!("Dropping undecodable transaction: {}", e);
-                        continue;
+            batch_opt = rx_mem_to_consensus.recv() => {
+                match batch_opt {
+                    None => {
+                        log::error!("Mempool channel closed");
+                        break;
                     }
-                    Some(Ok(tx)) => cx.storage.add_transaction(tx),
+                    Some(bh) => {
+                        log::debug!("Got new batch from mempool: {:?}", bh);
+                        cx.pending_batches.push_back(bh);
+                    }
                 }
             }
         }
-        // Do we have sufficient commands, and are we the view leader?
-        if cx.storage.get_tx_pool_size() >= block_size && cx.view_leader == myid {
-            log::debug!(
-                "I {} am the view leader and, I am proposing a block",
-                cx.myid()
-            );
-            let txs = cx.storage.cleave(block_size);
-            do_new_block(txs, &mut cx).await;
+        // View leader drains its pending-batch queue.
+        while cx.view_leader == myid && !cx.pending_batches.is_empty() {
+            let bh = cx.pending_batches.pop_front().unwrap();
+            log::debug!("I {} am the view leader and dispatching batch {:?}", cx.myid(), bh);
+            do_new_block(bh, &mut cx).await;
         }
-        // Can I start the UCR process?
         try_round_vote(&mut cx).await;
     }
 }

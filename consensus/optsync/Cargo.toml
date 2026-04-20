@@ -26,3 +26,8 @@ fnv = "1"
 net-common = { package = "common", git = "https://github.com/libdist-rs/libnet-rs.git", features = ["tls"] }
 tls-reliable-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }
 tls-receiver = { git = "https://github.com/libdist-rs/libnet-rs.git" }
+tcp-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }
+
+# libmempool-rs: Narwhal-style batching & batch store
+libmempool = { package = "libmempool-rs", git = "https://github.com/libdist-rs/libmempool-rs.git" }
+libstorage = { package = "libstorage-rs", git = "https://github.com/libdist-rs/libstorage-rs.git" }
