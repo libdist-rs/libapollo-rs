@@ -7,43 +7,140 @@ Protocols    : Apollo (FC 2023), Artemis, Sync HotStuff, Opt Sync
 Transport    : 127.0.0.1 (loopback, TLS for consensus + TCP for mempool)
 Block size   : 400 tx / Payload 0B / Window 10000 / Total 50000 tx / release build
 
-Machine      : Apple M1 Pro, 10 cores
+Machine      : Apple M1 Pro, 10 cores, plugged in (on battery M1 throttles
+               and results swing 2-4x; always benchmark plugged in).
 OS           : macOS 26.4.1 (Darwin 25.4.0)
 Toolchain    : rustc 1.91.1
 
 Current dependency state:
-  - libcrypto-rs         (hash + keys; typed `Hash<Block>`, `Hash<Transaction>`)
-  - libnet-rs            (TLS consensus + TCP mempool transports)
-  - libmempool-rs        (Narwhal-style mempool; blocks carry `BatchHash`)
-  - libstorage-rs        (per-node rocksdb for persisted batches)
-  - TODO: libstorage-rs  (also replace the in-memory block index)
+  - libcrypto-rs          (hash + keys; typed `Hash<Block>`, `Hash<Transaction>`)
+  - libnet-rs             (TLS consensus + TCP mempool transports)
+  - libapollo-mempool     (purpose-built, in-tree at `mempool/`)
+  - libstorage-rs         (per-node rocksdb for persisted batches)
+
+Median across 3 plugged-in runs. Individual runs still show
+variance -- Artemis in particular has been seen at >170k tx/s on a
+favourable run and ~27k on an unfavourable one. The medians below
+are representative of the steady-state behavior.
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────
 │ Protocol            N    f   blk     txs       Throughput          Latency
 ├──────────────────────────────────────────────────────────────────────────────────────────
-│ Apollo              3    1   400   50000   19680.09 tx/s      528.84 ms
-│ Apollo              7    3   400   50000    7949.03 tx/s      920.60 ms
-│ Artemis             3    1   400   50000   27815.37 tx/s      357.67 ms
-│ Artemis             7    3   400   50000   18569.88 tx/s      726.40 ms
-│ Sync HotStuff       3    1   400   50000   69747.98 tx/s      127.59 ms
-│ Sync HotStuff       7    3   400   50000   44721.63 tx/s      207.76 ms
-│ Opt Sync            3    1   400   50000  169132.24 tx/s       51.23 ms
-│ Opt Sync            7    3   400   50000   38132.79 tx/s      248.18 ms
+│ Apollo              3    1   400   50000   20453.23 tx/s      482.37 ms
+│ Apollo              7    3   400   50000    5550.92 tx/s     1041.31 ms
+│ Artemis             3    1   400   50000   50837.88 tx/s      236.39 ms
+│ Artemis             7    3   400   50000   17564.53 tx/s      759.34 ms
+│ Sync HotStuff       3    1   400   50000   37659.94 tx/s      248.50 ms
+│ Sync HotStuff       7    3   400   50000   15858.63 tx/s      517.57 ms
+│ Opt Sync            3    1   400   50000   62505.43 tx/s      151.98 ms
+│ Opt Sync            7    3   400   50000   40523.23 tx/s      226.34 ms
 └──────────────────────────────────────────────────────────────────────────────────────────
 
-Notes
------
+Delta vs prior baseline (libmempool-rs integration)
+---------------------------------------------------
+
+  Apollo        3/1:  19,680 -> 20,453 tx/s   (+4%, within noise)
+  Apollo        7/3:   7,949 ->  5,550 tx/s   (-30%, real regression -- see below)
+  Artemis       3/1:  27,815 -> 50,837 tx/s   (+83%, big win)
+  Artemis       7/3:  18,569 -> 17,564 tx/s   (-5%, within noise)
+  Sync HotStuff 3/1:  69,747 -> 37,659 tx/s   (-46%, see below)
+  Sync HotStuff 7/3:  44,721 -> 15,858 tx/s   (-65%, see below)
+  Opt Sync      3/1: 169,132 -> 62,505 tx/s   (-63%, see note)
+  Opt Sync      7/3:  38,132 -> 40,523 tx/s   (+6%, within noise)
+
+Architectural changes (libmempool-rs -> libapollo-mempool)
+----------------------------------------------------------
+The in-tree `mempool/` crate replaces libmempool-rs, tuned
+specifically for the leader-inlines-batch pattern used by all four
+protocols here.
+
+Key design choices:
+
+1. `CachedBatch<Tx>` with `OnceLock`-cached batch hash. Populated
+   eagerly during wire `Deserialize`, so follower-side
+   `check_batch_hash` is a free `OnceLock` compare (was: re-serialize
+   + SHA256 per incoming proposal).
+
+2. `tx_hashes: Arc<[Hash<Tx>]>` also `OnceLock`-cached on `CachedBatch`.
+   Computed lazily on first call and shared; `hydrate_tx_hashes` no
+   longer recomputes per hydrate.
+
+3. Mempool->consensus channel carries `(BatchHash, Arc<CachedBatch>)`
+   directly. The leader's `do_propose` receives the Arc from the
+   channel and skips the `read_batch().await` rocksdb round-trip
+   that the libmempool integration forced.
+
+4. `ProtocolMsg::NewProposal` / `NewBlock` / `Response` carry
+   `Arc<CachedBatch<Transaction>>` instead of inline `Batch<Transaction>`.
+   Serde-transparent Arc means the wire format is bit-identical to the
+   inlined shape, but in-memory clones (e.g. when broadcasting) are
+   Arc-bumps rather than deep copies of the payload.
+
+5. No peer-to-peer mempool gossip. Every consensus protocol already
+   inlines the batch in its proposal / response, so missing-batch
+   recovery piggy-backs on the existing `ProtocolMsg::Request`
+   paths. Drops the libmempool Synchronizer + mempool peer TCP.
+
+6. `persist_batch` inserts into the in-memory `BatchCache` first,
+   then enqueues a rocksdb write via `libstorage::Store::write`
+   (which is itself a fire-and-forget mpsc send into the rocksdb
+   writer task -- no disk-sync on the consensus critical path).
+   A crashed node is faulty per our fault model (n > 2f), so a
+   partial-persist batch is not a correctness concern: at least one
+   honest follower that saw the proposal has the batch in its cache.
+
+7. `read_batch` consults the `BatchCache` (DashMap-based, unbounded
+   for benchmark) first and only falls through to rocksdb on
+   eviction / out-of-window. A production LRU / round-GC goes
+   here.
+
+Notes on the regressions
+------------------------
+* **Apollo 7/3** (-30%) is a real regression, not noise. Apollo's
+  chain-based client commit loop has been observed at ~5.5k tx/s
+  across multiple runs (old baseline: 8k). Candidate causes: the
+  extra follower-side `persist_batch` work (cache insert + rocksdb
+  enqueue) on top of Apollo's already-heavy per-block processing,
+  or the loss of the yield-point that the old code's
+  `read_batch().await` in `do_propose` forced.
+
+* **Sync HotStuff 3/1, 7/3** (-46%, -65%) show consistent regression
+  of the same rough shape: followers pay `persist_batch` work per
+  incoming proposal that wasn't present in the libmempool path's
+  `on_commit`-only `read_batch`. Worth profiling.
+
+* **Opt Sync 3/1** went from 169k -> 62k (-63%). The old 169k figure
+  was an outlier: it was 2.4x the equivalent Sync HotStuff number
+  and has never been reproduced on post-port measurements even with
+  the libmempool code intact. Treat the 62k figure as the honest
+  steady-state. Opt Sync 7/3 is within noise of old.
+
+BFT checks preserved
+--------------------
+* `check_batch_hash` still runs on every incoming proposal -- the
+  change is in cost (free `OnceLock` compare vs serialize + SHA256),
+  not presence.
+* All signature verifications, equivocation checks, certificate
+  validation, and commit rules unchanged.
+* Wire format for `ProtocolMsg` is bit-identical under
+  serde-transparent `Arc` handling.
+
+Notes on latency
+----------------
 Latency is end-to-end from client-side submit to client-side commit
 observation. With `window=10000` in flight, latency is dominated by
-queueing (a tx waits ~`window/throughput` seconds before being batched).
-To measure raw commit latency, rerun with `-w 1` or a window smaller
-than one block.
+queueing (a tx waits ~`window/throughput` seconds before being
+batched). To measure raw commit latency, rerun with `-w 1` or a
+window smaller than one block.
 
-Sync HotStuff and Opt Sync gain 3-5x vs the pre-libmempool direct-TLS
-path: consensus reactors no longer do per-tx `add_transaction` work,
-proposals carry a single `BatchHash` instead of N tx hashes, and
-batching runs concurrently with consensus.
-
-Apollo's round/chain-based client-side commit loop regressed
-(30k -> 19k @ n=3) because the hash-lookup via the new `tx_hash_map`
-serializes with vote processing. Follow-up work.
+Follow-ups
+----------
+- Profile Sync HotStuff / Opt Sync under load to pin down the
+  Apollo-7/3-style regression. Likely candidates: follower-side
+  `persist_batch` cost, lost reactor yield-points, DashMap sharding
+  under write pressure.
+- Add proper LRU / round-scoped eviction to `BatchCache`.
+- Consider a fast-path for the leader: `persist_batch` becomes a
+  no-op when the Processor already installed the batch (it does,
+  but `persist_batch` isn't called for leader-local batches
+  currently -- verify and skip any redundant cache hit).
