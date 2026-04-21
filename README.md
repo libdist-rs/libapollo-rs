@@ -16,16 +16,39 @@ tag `apollo-fc2023-artifact`.
 
 ## Status
 
-Migration in progress from libchatter-rs onto the modern successor crates:
+Migration from libchatter-rs onto the modern successor crates is
+complete:
 
-- [x] Import from libchatter-rs@apollo-fc2023-artifact
-- [ ] [`libcrypto-rs`](https://github.com/libdist-rs/libcrypto-rs) -- replaces in-tree `crypto/`
-- [ ] [`libnet-rs`](https://github.com/libdist-rs/libnet-rs) -- replaces in-tree `net/`
-- [ ] [`libmempool-rs`](https://github.com/libdist-rs/libmempool-rs) -- replaces the per-protocol transaction pool
-- [ ] [`libstorage-rs`](https://github.com/libdist-rs/libstorage-rs) -- replaces the per-protocol in-memory block store
+- [x] Import from `libchatter-rs@apollo-fc2023-artifact`
+- [x] [`libcrypto-rs`](https://github.com/libdist-rs/libcrypto-rs) -- replaces in-tree `crypto/` (hashes, keypairs, typed `Hash<T>`)
+- [x] [`libnet-rs`](https://github.com/libdist-rs/libnet-rs) -- replaces in-tree `net/` (TLS + TCP transports)
+- [x] In-tree [`mempool/`](mempool/) crate (`libapollo-mempool`) -- replaces libmempool-rs; purpose-built for the leader-inlines-batch pattern, with cached batch hashes, Arc-shared batches, and no redundant rocksdb round-trip on the leader's propose path
+- [x] [`libstorage-rs`](https://github.com/libdist-rs/libstorage-rs) -- rocksdb batch store shared between mempool + consensus
 
-Each migration step is a focused commit validated end-to-end against the
-stress-test harness.
+Every migration step is a focused commit validated end-to-end by
+the stress-test harness. [`baseline_results.txt`](baseline_results.txt)
+captures the reference numbers from each milestone.
+
+## Repository layout
+
+```
+consensus/
+  apollo/      Apollo (FC 2023)   -- chain commit, rotating leader, 1-message-per-round
+  artemis/     Artemis            -- UCR chained voting, 1-hop commit, rotating round leader
+  synchs/      Sync HotStuff      -- 2Δ timer-based commit, view-based leader
+  optsync/     Opt Sync           -- Sync HotStuff + optimistic responsive fast path
+mempool/       libapollo-mempool  -- batching, Arc<CachedBatch>, rocksdb persist
+types/         wire types: blocks, transactions, proto/client msgs
+config/        node + client config (JSON/bincode/yaml)
+stress-test/   the canonical benchmark harness + a few ad-hoc perf tools
+tools/
+  genconfig/   config + TLS cert generator
+examples/
+  <protocol>/node      node binary for each protocol
+  <protocol>/client    stress-test client for each protocol
+scripts/       Fabric + boto3 harness for multi-VM AWS runs (see below)
+benchmarks/    rendered plots + summary CSV from the latest sweep
+```
 
 ## Building
 
@@ -33,18 +56,67 @@ stress-test harness.
 cargo build --release
 ```
 
-## Running the stress test
+Requires a recent stable Rust toolchain, `clang`, `cmake`, and the usual
+openssl/rocksdb build deps. On Amazon Linux 2023 ARM the full list is
+in [`scripts/fabfile.py`](scripts/fabfile.py) under `BOOTSTRAP`.
+
+## Running the loopback stress test
 
 ```sh
-cargo build --release
 ./target/release/stress-test
 ```
 
-The harness spawns N-node clusters on loopback for each of the four
-protocols, drives a client load, and prints throughput + latency in the
-same format as
-[`libnet-rs`'s stress test](https://github.com/libdist-rs/libnet-rs).
-The canonical baseline lives in [`baseline_results.txt`](baseline_results.txt).
+Spawns N-node clusters for each of the four protocols on loopback,
+drives a client load (50k transactions, window=10k, block_size=400 by
+default), and prints throughput + latency. Filter to a single protocol
+via `PROTO=<artemis|apollo|synchs|optsync>`.
+
+[`baseline_results.txt`](baseline_results.txt) records the canonical
+loopback numbers per architectural milestone. Note that loopback
+throughput is a *poor proxy for real performance* on a shared
+machine -- see [Multi-VM benchmarks](#multi-vm-benchmarks-aws) below.
+
+## Local performance tooling
+
+Two small harnesses under `stress-test/` go deeper than the stress-test
+harness on one protocol at a time:
+
+### `bench-artemis-metrics.sh`
+
+Runs Artemis `n=7/f=3` locally, SIGTERMs each node when the client
+finishes, and prints the node's in-memory metrics snapshot. Each
+consensus event (`propose`, `vote`, `round_advance`, `batch_recv`,
+`reactor_iter`) is counted atomically with inter-event histograms --
+near-zero overhead on the hot path, unlike `log::info!` tracing.
+
+```sh
+cargo build --release
+stress-test/bench-artemis-metrics.sh
+```
+
+Use it to pin down *which* reactor event is stalling when throughput is
+below what you expect. Capped at `TOKIO_WORKER_THREADS=2` per node by
+default to reduce contention on the local multi-process loopback
+benchmark (override with the env var).
+
+### `profile-artemis.sh` (samply)
+
+Runs Artemis `n=7/f=3` with one node wrapped in
+[samply](https://github.com/mstange/samply)'s sampling CPU profiler.
+`samply load <profile.json.gz>` renders the flamegraph in a local
+browser session.
+
+```sh
+brew install samply
+cargo build --profile profiling --bin node-artemis \
+            --bin client-artemis --bin genconfig
+stress-test/profile-artemis.sh
+samply load stress-test/runs/artemis-profile-*/node-0.samply.json.gz
+```
+
+The `profiling` cargo profile preserves debug info so samply's
+`--unstable-presymbolicate` emits a sidecar with fully symbolicated
+function names.
 
 ## Multi-VM benchmarks (AWS)
 
@@ -126,13 +198,46 @@ Budget for a clean full sweep: ~60-90 minutes wall-clock, ~$0.50-$0.80.
 
 ### Adapting to your own workload
 
-* Different instance type: `fab provision --instance-type m7g.medium`
-  (any ARM AMI will work; `fab provision --region us-west-2` for a
-  different region).
-* Different block / workload size: `fab bench --block-size 1000
+* **Different instance type or region:**
+  `fab provision --instance-type m7g.medium` (ARM/Graviton only --
+  the default AMI is `al2023-ami-*-arm64`; to use an x86 instance,
+  swap `DEFAULT_AMI_NAME_GLOB` in [`fabfile.py`](scripts/fabfile.py)
+  for an x86_64 glob). `fab provision --region us-west-2` for a
+  different region.
+* **Different block / workload size:** `fab bench --block-size 1000
   --total-txs 200000 --window 20000 ...`.
-* Different protocol sweep: `fab bench --protocols artemis,optsync
-  --configs 3:1,7:3,15:7`.
+* **Different sweep shape:** `fab bench --protocols artemis,optsync
+  --configs 3:1,7:3,15:7 --runs 5`.
 
-The `fab` task list (`fab -l`) surfaces every step; `fab <task> --help`
-documents each task's options.
+### Debugging mid-sweep
+
+The harness is designed to hand over control when something goes
+sideways:
+
+```sh
+fab status          # list instances + estimated hourly cost
+fab ssh --node 0    # print the ssh command (manually attach a shell)
+fab logs --node 0   # tail `bench/run/node.log` from the remote host
+fab stop            # kill the tmux session on every node, leave instances up
+fab teardown        # destroy everything when you're done
+```
+
+Each task is re-runnable on its own; `fab -l` lists them and
+`fab <task> --help` prints per-option flags.
+
+## `benchmarks/` contents
+
+Every successful `fab plot` produces:
+
+* `throughput.png`, `latency.png` -- grouped bar charts, one bar per
+  protocol per config, error bars = min/max across runs
+* `summary.csv` -- one row per (protocol, config) with min / median /
+  max for both metrics
+* `manifest.json` -- the sweep parameters (block size, window, number
+  of runs, AMI, region, instance count)
+
+Every *raw* run is preserved under
+`scripts/state/results/<stamp>-<tag>/<proto>-n<n>-f<f>/run-<r>/`:
+`client.log` (full stdout+stderr including DP lines) and a parsed
+`throughput_ms.json`. `fab plot` can re-render from any prior sweep
+via `fab plot --results <stamp>-<tag>`.
