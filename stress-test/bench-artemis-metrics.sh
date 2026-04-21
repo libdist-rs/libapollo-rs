@@ -50,6 +50,14 @@ for i in $(seq 0 $((N - 1))); do
     echo "127.0.0.1:$((CLI_BASE + i))" >>"$cli_ip_file"
 done
 
+# TOKIO_WORKER_THREADS caps each node's tokio runtime. On loopback
+# with N node processes sharing one machine, the default (one worker
+# per CPU = ~10 on M1 Pro) × N = heavy oversubscription, causing the
+# bimodal stall tail seen in metrics. Set to 2 so N=7 gives 14 workers
+# for ~10 cores, near-1:1 with physical cores. Env-override supported.
+export TOKIO_WORKER_THREADS=${TOKIO_WORKER_THREADS:-2}
+echo "[bench] TOKIO_WORKER_THREADS=$TOKIO_WORKER_THREADS"
+
 pids=()
 for i in $(seq 0 $((N - 1))); do
     "$BIN_DIR/node-artemis" \
