@@ -22,3 +22,12 @@ members = [
     "tools/genconfig",
     "stress-test",
 ]
+
+# Profile for samply / flamegraph / Instruments runs. Keeps release
+# optimizations but emits debug info so the sample->function symbol
+# resolution works end-to-end through our deps. `strip = "none"` is
+# the default, spelled out here for the profiling use-case.
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"
