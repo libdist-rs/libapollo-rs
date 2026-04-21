@@ -39,8 +39,32 @@ pub async fn reactor(
         is_client_apollo_enabled,
     );
     let myid = config.id;
+    let metrics = cx.metrics.clone();
+    let sigint_myid = myid;
+    // Install signal handlers once; on SIGINT or SIGTERM dump metrics
+    // to stderr and bail. `process::exit` forces the flush even when
+    // the reactor is blocked in `multicast`.
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = signal(SignalKind::terminate()).expect("SIGTERM stream");
+            let mut int = signal(SignalKind::interrupt()).expect("SIGINT stream");
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        metrics.print_summary(sigint_myid as u32);
+        std::process::exit(0);
+    });
 
     loop {
+        cx.metrics.record_reactor_iter();
         tokio::select! {
             pmsg_opt = consensus_recv.next() => {
                 let pmsg = match pmsg_opt {
@@ -67,7 +91,7 @@ pub async fn reactor(
                         break;
                     }
                     Some((bh, batch)) => {
-                        log::debug!("Got new batch from mempool: {:?}", bh);
+                        cx.metrics.record_batch_recv();
                         cx.pending_batches.push_back((bh, batch));
                     }
                 }

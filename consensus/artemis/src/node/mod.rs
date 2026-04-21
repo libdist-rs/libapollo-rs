@@ -33,3 +33,7 @@ pub use coordinator::*;
 /// Communication logic. `impl Context` blocks here are invoked through
 /// `Context`, no items need to be re-exported.
 mod comms;
+
+/// Lightweight in-memory metrics printed on SIGINT.
+pub mod metrics;
+pub use metrics::Metrics;

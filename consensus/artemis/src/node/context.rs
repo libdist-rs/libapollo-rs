@@ -90,6 +90,9 @@ pub struct Context {
     pub vote_ready: HashMap<Round, UCRVote>,
     pub block_processing_waiting: VecDeque<(Block, Arc<CachedBatch<Transaction>>)>,
     pub response_waiting: VecDeque<(Replica, Block, Arc<CachedBatch<Transaction>>)>,
+
+    /// Low-overhead reactor metrics; dumped on SIGINT.
+    pub metrics: Arc<super::metrics::Metrics>,
     pub other_buf: VecDeque<ProtocolMsg>,
 
     /// Block waiting (hash1, hash2)
@@ -161,6 +164,7 @@ impl Context {
             block_processing_waiting: VecDeque::new(),
             response_waiting: VecDeque::new(),
             other_buf: VecDeque::new(),
+            metrics: super::metrics::Metrics::new(),
         };
         for (id, pk_data) in &config.pk_map {
             if *id == c.myid {
@@ -197,6 +201,7 @@ impl Context {
 
     /// Goes to the next round
     pub(crate) fn update_round(&mut self) {
+        self.metrics.record_round_advance();
         let (new_leader, idx) = self.compute_next_round_leader();
         self.round_leader = new_leader;
         self.round += 1;

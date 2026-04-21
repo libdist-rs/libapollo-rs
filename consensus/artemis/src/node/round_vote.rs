@@ -25,6 +25,7 @@ pub async fn try_round_vote(cx: &mut Context) {
 
 /// Triggered when it is this node's turn to UCR vote
 pub async fn do_round_vote(cx: &mut Context) {
+    cx.metrics.record_vote();
     let mut v = UCRVote::new();
     v.hash = cx.last_seen_block.get_hash();
     v.round = cx.round();

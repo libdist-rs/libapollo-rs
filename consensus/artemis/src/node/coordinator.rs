@@ -17,7 +17,7 @@ pub async fn do_new_block(
     batch: Arc<CachedBatch<Transaction>>,
     cx: &mut Context,
 ) {
-    log::debug!("View leader dispatching a block");
+    cx.metrics.record_propose();
     let mut new_block = Block::with_batch(batch_hash.clone());
     // last_seen_block.get_hash() is Hash<artemis::Block>; the inner
     // header's `prev` is typed as Hash<types::Block>. The bytes are
