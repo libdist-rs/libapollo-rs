@@ -38,9 +38,10 @@ async fn setup_tx_factory(payload: usize) -> TxFactory {
 }
 
 /// Artemis's `ClientMsg::NewBlock` carries a tuple per block -- the
-/// block, server-hydrated tx hashes, and a payload. This alias names
-/// the tuple once to keep the wider signatures readable.
-pub type DeliveredBlock = (Block, Vec<Hash<Transaction>>, Payload);
+/// block, server-hydrated tx hashes, and a payload. The server ships
+/// `Arc<Block>` + `Arc<[Hash<Transaction>]>` so the in-memory shape
+/// matches `ClientMsg` without extra copies after deserialize.
+pub type DeliveredBlock = (Arc<Block>, Arc<[Hash<Transaction>]>, Payload);
 
 pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
     // Outgoing tx submission: plaintext TCP into each node's mempool.
@@ -158,10 +159,10 @@ async fn new_round(
 ) {
     for (b, tx_hashes, _) in block_vec {
         cx.pending += tx_hashes.len();
-        // Stash per-block tx hashes keyed by `Hash<artemis::Block>`
-        // (the `get_hash` bytes) so the commit loop can look them up.
+        // `b` is already `Arc<Block>` from the wire; both storage and
+        // `tx_hash_map` get the Arc-shared value (no deep clone).
         cx.tx_hash_map.insert(b.get_hash(), tx_hashes);
-        cx.storage.add_delivered_block(Arc::new(b));
+        cx.storage.add_delivered_block(b);
     }
     let v = Arc::new(v);
     cx.prop_chain.insert(v.round, v.clone());
@@ -183,7 +184,7 @@ async fn new_round(
         let next_hash =
             Hash::<Block>::try_from(b_rc.blk.header.prev.as_ref()).expect("hash is exactly 32 bytes");
         if let Some(hashes) = cx.tx_hash_map.remove(&com_hash) {
-            for tx_hash in &hashes {
+            for tx_hash in hashes.iter() {
                 if let Some(start) = cx.time_map.remove(tx_hash) {
                     cx.num_cmds += 1;
                     cx.latency_map.insert(tx_hash.clone(), (start, ts));

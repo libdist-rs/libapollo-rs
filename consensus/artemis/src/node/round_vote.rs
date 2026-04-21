@@ -1,5 +1,6 @@
+use libcrypto::hash::Hash;
 use std::convert::TryFrom;
-use types::{BlockTrait, artemis::{Block, ClientMsg, Payload, ProtocolMsg, Replica, UCRVote}};
+use types::{BlockTrait, artemis::{Block, ClientMsg, Payload, ProtocolMsg, Replica, Transaction, UCRVote}};
 use super::*;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -32,27 +33,37 @@ pub async fn do_round_vote(cx: &mut Context) {
     // Multicast the vote
     let msg = Arc::new(ProtocolMsg::UCRVote(v.clone()));
     cx.multicast(msg).await;
-    let mut block_vec: VecDeque<Block> = VecDeque::new();
+    // Walk the chain of blocks since last_voted_block, pushing
+    // `Arc<Block>` (not deep-cloning the Block value). In the happy
+    // case the chain depth is 1, but even when deeper the per-block
+    // clone cost stays at an Arc bump.
+    let mut block_vec: VecDeque<Arc<Block>> = VecDeque::new();
     let mut tail = v.hash.clone();
     while cx.last_voted_block.get_hash() != tail {
-        let b = cx.storage.delivered_block_from_hash(&tail).expect("Failed to get block");
-        block_vec.push_front(b.as_ref().clone());
+        let b = cx
+            .storage
+            .delivered_block_from_hash(&tail)
+            .expect("Failed to get block");
         tail = libcrypto::hash::Hash::<Block>::try_from(b.blk.header.prev.as_ref())
             .expect("hash is exactly 32 bytes");
+        block_vec.push_front(b);
     }
     let payload_size = cx.payload;
     // Hydrate each block's batch. `read_batch` hits the in-memory
-    // cache first; `tx_hashes` is `OnceLock`-cached.
-    let mut hydrated = Vec::with_capacity(block_vec.len());
+    // cache first; the `Arc<[Hash<Transaction>]>` returned by
+    // `CachedBatch::tx_hashes()` is `OnceLock`-cached, so the Vec
+    // that used to wrap it every hydrate call is avoided.
+    let mut hydrated: Vec<(Arc<Block>, Arc<[Hash<Transaction>]>, Payload)> =
+        Vec::with_capacity(block_vec.len());
     for b in block_vec {
-        let tx_hashes = match cx.read_batch(&b.blk.body.batch_hash).await {
-            Some(batch) => Context::hydrate_tx_hashes(batch.as_ref()),
+        let tx_hashes: Arc<[Hash<Transaction>]> = match cx.read_batch(&b.blk.body.batch_hash).await {
+            Some(batch) => batch.tx_hashes(),
             None => {
                 log::warn!(
                     "Missing batch {:?} at round-vote commit time; pushing empty hashes",
                     b.blk.body.batch_hash
                 );
-                Vec::new()
+                Arc::from(Vec::<Hash<Transaction>>::new().into_boxed_slice())
             }
         };
         hydrated.push((b, tx_hashes, Payload::with_payload(payload_size)));

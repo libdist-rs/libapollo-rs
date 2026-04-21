@@ -19,11 +19,10 @@ pub(crate) struct Context {
     pub time_map: HashMap<Hash<Transaction>, SystemTime>,
     /// The latency map contains the (start time, end time) for every transaction with hash `h`
     pub latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)>,
-    /// Server-hydrated tx hashes keyed by block hash. Populated on
-    /// `NewBlock` delivery so the commit loop can settle latencies
-    /// without reaching into `block.body.tx_hashes` (which no longer
-    /// exists post-libmempool).
-    pub tx_hash_map: HashMap<Hash<Block>, Vec<Hash<Transaction>>>,
+    /// Server-hydrated tx hashes keyed by block hash. `Arc<[Hash<Tx>]>`
+    /// (not `Vec`) matches the wire shape in `ClientMsg::NewBlock`, so
+    /// we insert the shared slice directly without a re-allocation.
+    pub tx_hash_map: HashMap<Hash<Block>, std::sync::Arc<[Hash<Transaction>]>>,
     /// To hold all of our blocks
     pub storage: Storage,
     /// Prop chain
