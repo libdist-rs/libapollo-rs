@@ -41,12 +41,12 @@ pub async fn do_round_vote(cx: &mut Context) {
             .expect("hash is exactly 32 bytes");
     }
     let payload_size = cx.payload;
-    // Hydrate each block's batch from the store; skip any for which
-    // the batch is missing rather than failing the whole notification.
+    // Hydrate each block's batch. `read_batch` hits the in-memory
+    // cache first; `tx_hashes` is `OnceLock`-cached.
     let mut hydrated = Vec::with_capacity(block_vec.len());
     for b in block_vec {
         let tx_hashes = match cx.read_batch(&b.blk.body.batch_hash).await {
-            Some(batch) => Context::hydrate_tx_hashes(&batch),
+            Some(batch) => Context::hydrate_tx_hashes(batch.as_ref()),
             None => {
                 log::warn!(
                     "Missing batch {:?} at round-vote commit time; pushing empty hashes",

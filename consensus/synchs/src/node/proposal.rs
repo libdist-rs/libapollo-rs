@@ -1,6 +1,5 @@
 use super::context::Context;
-use libcrypto::hash::Hash;
-use libmempool::{Batch, BatchHash};
+use libmempool::{BatchHash, CachedBatch};
 use std::collections::HashSet;
 use std::sync::Arc;
 use types::synchs::{Block, CertType, Certificate, ProtocolMsg, Propose, Transaction, Vote};
@@ -83,22 +82,18 @@ pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
 /// Verify that the batch carried in the proposal hashes to the
 /// batch_hash the block commits to. Cheap sanity check; protects
 /// against a byzantine leader swapping batches post-hash.
-pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
-    let serialized = match bincode::serialize(batch) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("Failed to serialize incoming batch for hash check: {}", e);
-            return false;
-        }
-    };
-    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
-    computed == block.body.batch_hash
+///
+/// Post-libapollo-mempool, `CachedBatch::hash()` is `OnceLock`-cached
+/// and was populated during the wire `Deserialize`, so this is a
+/// ~32-byte equality compare rather than a serialize + SHA256.
+pub fn check_batch_hash(block: &Block, batch: &CachedBatch<Transaction>) -> bool {
+    batch.hash() == block.body.batch_hash
 }
 
 pub async fn on_receive_proposal(
     p: Arc<Propose>,
     new_block: Arc<Block>,
-    batch: Batch<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
     cx: &mut Context,
 ) -> bool {
     log::debug!("Received a proposal: {}", new_block.header.height);
@@ -113,15 +108,14 @@ pub async fn on_receive_proposal(
         return false;
     }
 
-    if !check_batch_hash(new_block.as_ref(), &batch) {
+    if !check_batch_hash(new_block.as_ref(), batch.as_ref()) {
         log::warn!("Batch hash mismatch; dropping proposal");
         return false;
     }
 
-    // Persist the batch so `on_commit` can hydrate it later for client
-    // notifications. Done before emitting the vote so a crash between
-    // vote and commit still has a recoverable batch on disk.
-    cx.persist_batch(new_block.body.batch_hash.clone(), &batch).await;
+    // Install the batch in the in-memory cache + enqueue rocksdb
+    // write. `store.write` is fire-and-forget, so this is cheap.
+    cx.persist_batch(new_block.body.batch_hash.clone(), batch).await;
 
     on_new_valid_proposal(p, new_block, cx).await
 }
@@ -167,24 +161,14 @@ pub async fn on_new_valid_proposal(
 }
 
 /// Leader proposes a new block that references an already-batched
-/// tx bundle. Reads the batch from local storage (the mempool
-/// processor wrote it before firing the hash onto `rx_mem_to_consensus`),
-/// wraps it in `Block::with_batch`, and broadcasts.
+/// tx bundle. Post-libapollo-mempool the Processor hands us
+/// `(hash, Arc<CachedBatch>)` on the mempool-to-consensus channel, so
+/// we propose directly from the Arc -- no `read_batch` round-trip.
 pub async fn do_propose(
     batch_hash: BatchHash<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
     cx: &mut Context,
 ) -> Option<(Arc<Propose>, Arc<Block>)> {
-    let batch = match cx.read_batch(&batch_hash).await {
-        Some(b) => b,
-        None => {
-            log::warn!(
-                "Leader's own batch {:?} missing from store; skipping propose",
-                batch_hash
-            );
-            return None;
-        }
-    };
-
     let parent = cx.last_seen_block.clone();
 
     let mut new_block = Block::with_batch(batch_hash.clone());
@@ -222,6 +206,9 @@ pub async fn do_propose(
 
     cx.storage.add_delivered_block(new_block_ref.clone());
 
+    // `batch` was already installed in the cache + persisted by the
+    // local mempool's Processor before it reached us on the channel,
+    // so no `persist_batch` here.
     let msg = ProtocolMsg::NewProposal(p.clone(), new_block_ref.as_ref().clone(), batch);
     cx.multicast(&msg).await;
 

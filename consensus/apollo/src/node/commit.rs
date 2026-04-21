@@ -14,19 +14,18 @@ pub async fn do_commit(cx: &mut Context) {
     }
 
     // Non-special clients learn about commits here (special clients
-    // were notified at propose time via `do_propose`). We hydrate tx
-    // hashes out of the batch store so the client-side latency
-    // tracker has something to match its submissions against.
+    // were notified at propose time via `do_propose`). `read_batch`
+    // hits the in-memory cache; hydrate_tx_hashes is `OnceLock`-cached.
     if !cx.is_client_apollo_enabled() {
         let commit_block = cx
             .storage
             .delivered_block_from_hash(&p.block_hash)
             .unwrap();
         let tx_hashes = match cx.read_batch(&commit_block.body.batch_hash).await {
-            Some(batch) => Context::hydrate_tx_hashes(&batch),
+            Some(batch) => Context::hydrate_tx_hashes(batch.as_ref()),
             None => {
                 log::warn!(
-                    "Batch {:?} missing at commit time; pushing empty client notification",
+                    "Batch {:?} missing from cache+store at commit time; pushing empty client notification",
                     commit_block.body.batch_hash
                 );
                 Vec::new()

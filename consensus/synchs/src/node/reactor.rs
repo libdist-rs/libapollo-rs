@@ -4,7 +4,7 @@
 /// clients accordingly.
 use super::{commit::on_commit, context::Context, proposal::*, vote::on_vote};
 use config::{ClientId, Node};
-use libmempool::{BatchHash, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
 use libstorage::rocksdb::Storage as RocksStore;
 use std::sync::Arc;
 use tls_receiver::TlsReceiver;
@@ -19,7 +19,11 @@ pub async fn reactor(
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
     client_net: TlsReliableSender<ClientId, ClientMsg>,
     batch_store: RocksStore,
-    mut rx_mem_to_consensus: UnboundedReceiver<BatchHash<Transaction>>,
+    batch_cache: Arc<BatchCache<Transaction>>,
+    mut rx_mem_to_consensus: UnboundedReceiver<(
+        BatchHash<Transaction>,
+        Arc<CachedBatch<Transaction>>,
+    )>,
     tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Height, Transaction>>,
 ) {
     let d2 = std::time::Duration::from_millis(2 * config.delta);
@@ -29,6 +33,7 @@ pub async fn reactor(
         consensus_net,
         client_net,
         batch_store,
+        batch_cache,
         tx_consensus_to_mem,
     );
     let myid = config.id;
@@ -48,6 +53,9 @@ pub async fn reactor(
                     log::debug!("Received a proposal: {:?}", p);
                     let p = Arc::new(p);
                     let b = Arc::new(b);
+                    // `batch` already arrived as `Arc<CachedBatch>` on the wire
+                    // (serde-transparent Arc). Its `BatchHash` was populated
+                    // during Deserialize, so `check_batch_hash` will be free.
                     let decision = on_receive_proposal(p.clone(), b, batch, &mut cx).await;
                     log::debug!("Decision for the incoming proposal is {}", decision);
                     if decision {
@@ -58,20 +66,19 @@ pub async fn reactor(
                     on_vote(v, p, &mut cx).await;
                 }
             },
-            batch_hash_opt = rx_mem_to_consensus.recv() => {
-                // Mempool announced a new batch is ready for consensus.
-                // Leaders pop it off `pending_batches` when they next
-                // have a certified parent; non-leaders just store it
-                // (wasted in practice, since they'll never become
-                // leader in sync hotstuff's fixed-leader view).
-                match batch_hash_opt {
+            batch_opt = rx_mem_to_consensus.recv() => {
+                // Mempool's Processor announced a new batch is ready
+                // for consensus, and hands us the `Arc<CachedBatch>`
+                // directly so the leader can propose without a
+                // rocksdb round-trip.
+                match batch_opt {
                     None => {
                         log::error!("Mempool channel closed");
                         break;
                     }
-                    Some(bh) => {
+                    Some((bh, batch)) => {
                         log::debug!("Got new batch from mempool: {:?}", bh);
-                        cx.pending_batches.push_back(bh);
+                        cx.pending_batches.push_back((bh, batch));
                     }
                 }
             },
@@ -97,9 +104,9 @@ pub async fn reactor(
             && cx.cert_map.contains_key(&cx.last_seen_block.hash.clone())
             && !cx.pending_batches.is_empty()
         {
-            let bh = cx.pending_batches.pop_front().unwrap();
+            let (bh, batch) = cx.pending_batches.pop_front().unwrap();
             log::debug!("I {} am the leader and proposing batch {:?}", cx.myid, bh);
-            if let Some((p, _b)) = do_propose(bh, &mut cx).await {
+            if let Some((p, _b)) = do_propose(bh, batch, &mut cx).await {
                 // Start the commit timer after propose, matching the
                 // pre-mempool behaviour.
                 cx.commit_queue.insert(p, d2);

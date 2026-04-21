@@ -1,6 +1,5 @@
 use crate::node::context::Context;
-use libcrypto::hash::Hash;
-use libmempool::{Batch, BatchHash};
+use libmempool::{BatchHash, CachedBatch};
 use std::collections::HashSet;
 use std::sync::Arc;
 use types::optsync::{
@@ -80,23 +79,16 @@ pub fn check_proposal(p: &Propose, new_block: &Block, cx: &Context) -> bool {
 }
 
 /// Verify the batch carried in a proposal hashes to the block's
-/// committed `batch_hash`.
-pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
-    let serialized = match bincode::serialize(batch) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("Failed to serialize incoming batch for hash check: {}", e);
-            return false;
-        }
-    };
-    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
-    computed == block.body.batch_hash
+/// committed `batch_hash`. Free `OnceLock` compare -- the hash was
+/// populated during the wire `Deserialize`.
+pub fn check_batch_hash(block: &Block, batch: &CachedBatch<Transaction>) -> bool {
+    batch.hash() == block.body.batch_hash
 }
 
 pub async fn on_receive_proposal(
     p: Arc<Propose>,
     new_block: Arc<Block>,
-    batch: Batch<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
     cx: &mut Context,
 ) -> bool {
     log::debug!("Received a proposal: {}", new_block.header.height);
@@ -111,12 +103,12 @@ pub async fn on_receive_proposal(
         return false;
     }
 
-    if !check_batch_hash(new_block.as_ref(), &batch) {
+    if !check_batch_hash(new_block.as_ref(), batch.as_ref()) {
         log::warn!("Batch hash mismatch; dropping proposal");
         return false;
     }
 
-    cx.persist_batch(new_block.body.batch_hash.clone(), &batch).await;
+    cx.persist_batch(new_block.body.batch_hash.clone(), batch).await;
 
     on_new_valid_proposal(p, new_block, cx).await
 }
@@ -163,19 +155,9 @@ pub async fn on_new_valid_proposal(
 
 pub async fn do_propose(
     batch_hash: BatchHash<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
     cx: &mut Context,
 ) -> Option<Arc<Propose>> {
-    let batch = match cx.read_batch(&batch_hash).await {
-        Some(b) => b,
-        None => {
-            log::warn!(
-                "Leader's own batch {:?} missing from store; skipping propose",
-                batch_hash
-            );
-            return None;
-        }
-    };
-
     let parent = cx.last_seen_block.clone();
     let mut new_block = Block::with_batch(batch_hash.clone());
 

@@ -1,7 +1,8 @@
 use libcrypto::hash::Hash;
-use libmempool::Batch;
+use libmempool::CachedBatch;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::{Block, Replica, Transaction, UCRVote, Vote};
 
@@ -10,7 +11,9 @@ use super::{Block, Replica, Transaction, UCRVote, Vote};
 pub enum ProtocolMsg {
     /// View leader's new block together with the referenced batch so
     /// followers can persist it without a sync round-trip.
-    NewBlock(Block, Batch<Transaction>),
+    /// `Arc<CachedBatch>` for cheap in-memory clones; serializes
+    /// transparently as `CachedBatch` on the wire.
+    NewBlock(Block, Arc<CachedBatch<Transaction>>),
 
     /// Round leader's vote. Sent directly by the round leader, so
     /// `sig.origin` identifies the sender.
@@ -28,7 +31,7 @@ pub enum ProtocolMsg {
     /// Reply carrying the requested block + its batch. Carries `from`
     /// so the requester can request the block's parent from the
     /// responder.
-    Response(Replica, u64, Block, Batch<Transaction>),
+    Response(Replica, u64, Block, Arc<CachedBatch<Transaction>>),
 
     Invalid,
 }

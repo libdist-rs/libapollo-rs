@@ -1,15 +1,17 @@
 use libcrypto::hash::Hash;
-use libmempool::Batch;
+use libmempool::CachedBatch;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::{Block, Certificate, Payload, Propose, Transaction, View};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMsg {
     /// Leader's new proposal + the referenced batch so followers can
-    /// persist it without a separate sync round-trip.
-    NewProposal(Propose, Block, Batch<Transaction>),
+    /// persist it without a separate sync round-trip. `Arc<CachedBatch>`
+    /// for cheap in-memory clones; wire identical to `CachedBatch`.
+    NewProposal(Propose, Block, Arc<CachedBatch<Transaction>>),
     /// A vote for a proposed block.
     VoteMsg(Certificate, Propose),
     /// Two equivocating proposals from the same leader.

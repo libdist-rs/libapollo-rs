@@ -1,15 +1,13 @@
 use clap::{load_yaml, App};
 use config::{ClientId, Node};
 use fnv::FnvHashMap;
-use libmempool::batcher::Batcher;
-use libmempool::{Config as MempoolConfig, Mempool};
+use libmempool::{BatchHash, CachedBatch, ConsensusMempoolMsg, Mempool};
 use libstorage::rocksdb::Storage as RocksStore;
 use net_common::{CertSource, TlsOptions};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
-use tcp_sender::TcpSimpleSender;
+use std::sync::Arc;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::unbounded_channel;
@@ -137,61 +135,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .expect("client sender setup");
 
-        let mut mempool_peer_map: FnvHashMap<Replica, SocketAddr> = FnvHashMap::default();
-        for (&id, addr) in &config.mempool_net_map {
-            if id == config.id {
-                continue;
-            }
-            mempool_peer_map.insert(
-                id,
-                addr.parse()
-                    .unwrap_or_else(|_| panic!("invalid mempool addr for {}: {}", id, addr)),
-            );
-        }
-        let mempool_sender = TcpSimpleSender::with_peers(mempool_peer_map);
-
         let (tx_consensus_to_mem, rx_consensus_to_mem) =
-            unbounded_channel::<libmempool::ConsensusMempoolMsg<Replica, Round, Transaction>>();
-        let (tx_batcher, rx_batcher) = unbounded_channel();
-        let (tx_processor, rx_processor) = unbounded_channel();
-        let (tx_mem_to_consensus, rx_mem_to_consensus) = unbounded_channel();
+            unbounded_channel::<ConsensusMempoolMsg<Replica, Round, Transaction>>();
+        let (tx_mem_to_consensus, rx_mem_to_consensus) = unbounded_channel::<(
+            BatchHash<Transaction>,
+            Arc<CachedBatch<Transaction>>,
+        )>();
 
-        Batcher::spawn(
-            rx_batcher,
-            tx_processor.clone(),
-            CountSealer::<Transaction>::new(config.block_size),
-        );
-
-        let all_ids: Vec<Replica> = (0..config.num_nodes as Replica).collect();
-        let mempool_params = MempoolConfig::<Round> {
-            gc_depth: 50,
-            sync_retry_delay: Duration::from_millis(100),
-            sync_retry_nodes: 3,
-        };
-
-        let mempool_addr: SocketAddr = config
-            .mempool_ip()
-            .parse()
-            .expect("failed to parse mempool listen addr");
-        let client_addr: SocketAddr = config
+        let client_intake: SocketAddr = config
             .client_ip()
             .parse()
             .expect("failed to parse mempool client-facing addr");
 
-        Mempool::<Replica, Round, RocksStore, Transaction>::spawn(
-            config.id,
-            all_ids,
-            mempool_params,
+        let mempool = Mempool::<Transaction>::spawn::<
+            CountSealer,
+            RocksStore,
+            Replica,
+            Round,
+        >(
+            CountSealer::new(config.block_size),
             batch_store.clone(),
-            mempool_sender,
-            rx_consensus_to_mem,
-            tx_batcher,
-            tx_processor,
-            rx_processor,
+            client_intake,
             tx_mem_to_consensus,
-            mempool_addr,
-            client_addr,
+            rx_consensus_to_mem,
+            None,
         );
+        let batch_cache = mempool.cache;
 
         let sleep_time = unsafe { config::SLEEP_TIME };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
@@ -203,6 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             consensus_recv,
             client_net,
             batch_store,
+            batch_cache,
             rx_mem_to_consensus,
             tx_consensus_to_mem,
         )

@@ -28,6 +28,6 @@ tls-reliable-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }
 tls-receiver = { git = "https://github.com/libdist-rs/libnet-rs.git" }
 tcp-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }
 
-# libmempool-rs: Narwhal-style batching & batch store
-libmempool = { package = "libmempool-rs", git = "https://github.com/libdist-rs/libmempool-rs.git" }
+# libapollo-mempool: in-tree Narwhal-style batching (purpose-built)
+libmempool = { package = "libapollo-mempool", path = "../../mempool" }
 libstorage = { package = "libstorage-rs", git = "https://github.com/libdist-rs/libstorage-rs.git" }

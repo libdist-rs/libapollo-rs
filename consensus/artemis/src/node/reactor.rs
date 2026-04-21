@@ -6,8 +6,9 @@ use super::{buffer_message, context::Context, do_new_block, process_message};
 use crate::node::round_vote::try_round_vote;
 use config::{ClientId, Node};
 use futures::future::FutureExt;
-use libmempool::{BatchHash, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
 use libstorage::rocksdb::Storage as RocksStore;
+use std::sync::Arc;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -21,7 +22,11 @@ pub async fn reactor(
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
     client_net: TlsReliableSender<ClientId, ClientMsg>,
     batch_store: RocksStore,
-    mut rx_mem_to_consensus: UnboundedReceiver<BatchHash<Transaction>>,
+    batch_cache: Arc<BatchCache<Transaction>>,
+    mut rx_mem_to_consensus: UnboundedReceiver<(
+        BatchHash<Transaction>,
+        Arc<CachedBatch<Transaction>>,
+    )>,
     tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
 ) {
     let mut cx = Context::new(
@@ -29,6 +34,7 @@ pub async fn reactor(
         consensus_net,
         client_net,
         batch_store,
+        batch_cache,
         tx_consensus_to_mem,
         is_client_apollo_enabled,
     );
@@ -60,18 +66,18 @@ pub async fn reactor(
                         log::error!("Mempool channel closed");
                         break;
                     }
-                    Some(bh) => {
+                    Some((bh, batch)) => {
                         log::debug!("Got new batch from mempool: {:?}", bh);
-                        cx.pending_batches.push_back(bh);
+                        cx.pending_batches.push_back((bh, batch));
                     }
                 }
             }
         }
         // View leader drains its pending-batch queue.
         while cx.view_leader == myid && !cx.pending_batches.is_empty() {
-            let bh = cx.pending_batches.pop_front().unwrap();
+            let (bh, batch) = cx.pending_batches.pop_front().unwrap();
             log::debug!("I {} am the view leader and dispatching batch {:?}", cx.myid(), bh);
-            do_new_block(bh, &mut cx).await;
+            do_new_block(bh, batch, &mut cx).await;
         }
         try_round_vote(&mut cx).await;
     }

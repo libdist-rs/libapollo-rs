@@ -4,8 +4,9 @@
 /// clients accordingly.
 use crate::node::{context::Context, process::process_msg, proposal::do_propose};
 use config::{ClientId, Node};
-use libmempool::{BatchHash, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
 use libstorage::rocksdb::Storage as RocksStore;
+use std::sync::Arc;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -18,7 +19,11 @@ pub async fn reactor(
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
     client_net: TlsReliableSender<ClientId, ClientMsg>,
     batch_store: RocksStore,
-    mut rx_mem_to_consensus: UnboundedReceiver<BatchHash<Transaction>>,
+    batch_cache: Arc<BatchCache<Transaction>>,
+    mut rx_mem_to_consensus: UnboundedReceiver<(
+        BatchHash<Transaction>,
+        Arc<CachedBatch<Transaction>>,
+    )>,
     tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Height, Transaction>>,
 ) {
     log::debug!("Started timers");
@@ -27,6 +32,7 @@ pub async fn reactor(
         consensus_net,
         client_net,
         batch_store,
+        batch_cache,
         tx_consensus_to_mem,
     );
     let myid = config.id;
@@ -49,9 +55,9 @@ pub async fn reactor(
                         log::error!("Mempool channel closed");
                         break;
                     }
-                    Some(bh) => {
+                    Some((bh, batch)) => {
                         log::debug!("Got new batch from mempool: {:?}", bh);
-                        cx.pending_batches.push_back(bh);
+                        cx.pending_batches.push_back((bh, batch));
                     }
                 }
             },
@@ -75,9 +81,9 @@ pub async fn reactor(
             && cx.cert_map.contains_key(&cx.last_seen_block.hash.clone())
             && !cx.pending_batches.is_empty()
         {
-            let bh = cx.pending_batches.pop_front().unwrap();
+            let (bh, batch) = cx.pending_batches.pop_front().unwrap();
             log::debug!("I {} am the leader and proposing batch {:?}", cx.myid, bh);
-            do_propose(bh, &mut cx).await;
+            do_propose(bh, batch, &mut cx).await;
         }
     }
 }

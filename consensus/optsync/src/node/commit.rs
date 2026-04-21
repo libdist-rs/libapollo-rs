@@ -21,15 +21,14 @@ pub async fn on_commit(p: Arc<Propose>, cx: &mut Context) {
     cx.last_committed_block_ht = b.header.height;
     cx.storage.add_committed_block(b.clone());
 
+    // `tx_hashes()` is OnceLock-cached: free on the leader (intake
+    // pipeline pre-filled), one-time SHA256 pass on followers the
+    // first time a given batch commits.
     let tx_hashes: Vec<Hash<Transaction>> = match cx.read_batch(&b.body.batch_hash).await {
-        Some(batch) => batch
-            .payload
-            .iter()
-            .map(|tx| Hash::<Transaction>::ser_and_hash(tx))
-            .collect(),
+        Some(batch) => batch.tx_hashes().to_vec(),
         None => {
             log::warn!(
-                "Batch {:?} missing at commit time; pushing empty client notification",
+                "Batch {:?} missing from cache+store at commit time; pushing empty client notification",
                 b.body.batch_hash
             );
             Vec::new()

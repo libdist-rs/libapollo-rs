@@ -1,5 +1,5 @@
 use libcrypto::hash::Hash;
-use libmempool::{Batch, BatchHash};
+use libmempool::{BatchHash, CachedBatch};
 use std::convert::TryFrom;
 use std::sync::Arc;
 use types::{
@@ -9,22 +9,14 @@ use types::{
 
 use super::context::Context;
 
-/// View leader dispatches a new block referencing `batch_hash`. Reads
-/// the corresponding batch from the local store and broadcasts
-/// `NewBlock(block, batch)` so followers can persist it and vote
-/// without a separate sync round-trip.
-pub async fn do_new_block(batch_hash: BatchHash<Transaction>, cx: &mut Context) {
-    let batch = match cx.read_batch(&batch_hash).await {
-        Some(b) => b,
-        None => {
-            log::warn!(
-                "Leader's own batch {:?} missing from store; skipping new block",
-                batch_hash
-            );
-            return;
-        }
-    };
-
+/// View leader dispatches a new block referencing `batch_hash`. The
+/// `Arc<CachedBatch>` arrives directly on the mempool->consensus
+/// channel -- no rocksdb read.
+pub async fn do_new_block(
+    batch_hash: BatchHash<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
+    cx: &mut Context,
+) {
     log::debug!("View leader dispatching a block");
     let mut new_block = Block::with_batch(batch_hash.clone());
     // last_seen_block.get_hash() is Hash<artemis::Block>; the inner
@@ -93,17 +85,10 @@ pub async fn on_receive_new_block_direct(cx: &mut Context, blk: Block) {
 
 /// Verify that a batch carried in `ProtocolMsg::NewBlock` /
 /// `ProtocolMsg::Response` hashes to the block's referenced
-/// `batch_hash`.
-pub fn check_batch_hash(blk: &Block, batch: &Batch<Transaction>) -> bool {
-    let serialized = match bincode::serialize(batch) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("Failed to serialize batch for hash check: {}", e);
-            return false;
-        }
-    };
-    let computed: BatchHash<Transaction> = Hash::do_hash(&serialized);
-    computed == blk.blk.body.batch_hash
+/// `batch_hash`. Free `OnceLock` compare -- the hash was populated
+/// during the wire `Deserialize`.
+pub fn check_batch_hash(blk: &Block, batch: &CachedBatch<Transaction>) -> bool {
+    batch.hash() == blk.blk.body.batch_hash
 }
 
 pub fn do_delivery(blk: Block, cx: &mut Context) {

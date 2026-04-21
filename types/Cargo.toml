@@ -5,11 +5,11 @@ authors = ["hermitsage <dth.bht@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 bincode = "1"
 libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs.git" }
 net-common = { package = "common", git = "https://github.com/libdist-rs/libnet-rs.git" }
-libmempool = { package = "libmempool-rs", git = "https://github.com/libdist-rs/libmempool-rs.git" }
+libmempool = { package = "libapollo-mempool", path = "../mempool" }
 futures = "0.3"
 anyhow = "1"
 tokio-util = { version = "0.6", features = ["codec"] }

@@ -34,8 +34,8 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
+ "libapollo-mempool",
  "libcrypto",
- "libmempool-rs",
  "libstorage-rs",
  "log",
  "priority-queue",
@@ -67,8 +67,8 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
+ "libapollo-mempool",
  "libcrypto",
- "libmempool-rs",
  "libstorage-rs",
  "linked-hash-map",
  "log",
@@ -315,7 +315,7 @@ dependencies = [
  "config",
  "consensus",
  "log",
- "simple_logger 1.16.0",
+ "simple_logger 5.2.0",
  "tokio",
  "types",
  "util",
@@ -330,7 +330,7 @@ dependencies = [
  "consensus",
  "log",
  "optsync",
- "simple_logger 1.16.0",
+ "simple_logger 5.2.0",
  "tokio",
  "types",
  "util",
@@ -503,6 +503,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -810,6 +823,12 @@ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
@@ -932,6 +951,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "libapollo-mempool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytes",
+ "common",
+ "dashmap",
+ "futures",
+ "libcrypto",
+ "libstorage-rs",
+ "log",
+ "serde",
+ "tcp-receiver",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -979,28 +1017,6 @@ dependencies = [
  "parking_lot",
  "sealed",
  "thiserror",
-]
-
-[[package]]
-name = "libmempool-rs"
-version = "0.2.0"
-source = "git+https://github.com/libdist-rs/libmempool-rs.git#f33981e5121ff7dec758ff3e5c2049fe73a3253f"
-dependencies = [
- "anyhow",
- "bincode",
- "bytes",
- "common",
- "fnv",
- "futures",
- "libcrypto",
- "libstorage-rs",
- "log",
- "rand",
- "serde",
- "tcp-receiver",
- "tcp-reliable-sender",
- "tcp-sender",
- "tokio",
 ]
 
 [[package]]
@@ -1178,7 +1194,7 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
- "libmempool-rs",
+ "libapollo-mempool",
  "libstorage-rs",
  "log",
  "simple_logger 5.2.0",
@@ -1201,10 +1217,10 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
- "libmempool-rs",
+ "libapollo-mempool",
  "libstorage-rs",
  "log",
- "simple_logger 1.16.0",
+ "simple_logger 5.2.0",
  "tcp-sender",
  "tls-receiver",
  "tls-reliable-sender",
@@ -1223,11 +1239,11 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
- "libmempool-rs",
+ "libapollo-mempool",
  "libstorage-rs",
  "log",
  "optsync",
- "simple_logger 1.16.0",
+ "simple_logger 5.2.0",
  "tcp-sender",
  "tls-receiver",
  "tls-reliable-sender",
@@ -1246,7 +1262,7 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
- "libmempool-rs",
+ "libapollo-mempool",
  "libstorage-rs",
  "log",
  "simple_logger 5.2.0",
@@ -1359,8 +1375,8 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
+ "libapollo-mempool",
  "libcrypto",
- "libmempool-rs",
  "libstorage-rs",
  "log",
  "priority-queue",
@@ -1912,8 +1928,8 @@ dependencies = [
  "consensus",
  "fnv",
  "futures",
+ "libapollo-mempool",
  "libcrypto",
- "libmempool-rs",
  "libstorage-rs",
  "log",
  "priority-queue",
@@ -1935,22 +1951,6 @@ source = "git+https://github.com/libdist-rs/libnet-rs.git#9f00cf0b80ebd64559ce32
 dependencies = [
  "bytes",
  "common",
- "futures",
- "log",
- "socket2 0.5.10",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "tcp-reliable-sender"
-version = "0.2.0"
-source = "git+https://github.com/libdist-rs/libnet-rs.git#9f00cf0b80ebd64559ce32bc3d7050460113ba1e"
-dependencies = [
- "bytes",
- "common",
- "fnv",
  "futures",
  "log",
  "socket2 0.5.10",
@@ -2162,8 +2162,8 @@ dependencies = [
  "common",
  "fnv",
  "futures",
+ "libapollo-mempool",
  "libcrypto",
- "libmempool-rs",
  "log",
  "serde",
  "tokio-util",

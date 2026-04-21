@@ -1,7 +1,6 @@
 use libcrypto::hash::Hash;
-use libmempool::Batch;
 use std::convert::TryFrom;
-use types::artemis::{Block, ProtocolMsg, Replica, Transaction};
+use types::artemis::{Block, ProtocolMsg, Replica};
 use types::BlockTrait;
 
 use super::coordinator::check_batch_hash;
@@ -25,20 +24,20 @@ pub fn buffer_message(message: ProtocolMsg, cx: &mut Context) {
 pub async fn process_message(cx: &mut Context) {
     // Process view leader's blocks (persist batch, then deliver).
     while let Some((b, batch)) = cx.block_processing_waiting.pop_front() {
-        if !check_batch_hash(&b, &batch) {
+        if !check_batch_hash(&b, batch.as_ref()) {
             log::warn!("Batch hash mismatch on NewBlock; dropping");
             continue;
         }
-        cx.persist_batch(b.blk.body.batch_hash.clone(), &batch).await;
+        cx.persist_batch(b.blk.body.batch_hash.clone(), batch).await;
         on_receive_new_block_direct(cx, b).await;
     }
     // Responses (same: persist then deliver).
     while let Some((sender, block, batch)) = cx.response_waiting.pop_front() {
-        if !check_batch_hash(&block, &batch) {
+        if !check_batch_hash(&block, batch.as_ref()) {
             log::warn!("Batch hash mismatch on Response; dropping");
             continue;
         }
-        cx.persist_batch(block.blk.body.batch_hash.clone(), &batch).await;
+        cx.persist_batch(block.blk.body.batch_hash.clone(), batch).await;
         update_delivery(cx, block, sender).await;
     }
     while let Some(v) = cx.vote_ready.remove(&cx.round()) {
@@ -84,7 +83,3 @@ pub async fn update_delivery(cx: &mut Context, b: Block, sender: Replica) {
     do_delivery(b, cx);
 }
 
-// Suppress the unused-type warning for `Batch` / `Transaction` when
-// re-exported via `buffer_message`'s signature.
-#[allow(dead_code)]
-fn _assert_types(_: Batch<Transaction>) {}

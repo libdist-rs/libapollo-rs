@@ -1,7 +1,8 @@
 use libcrypto::hash::Hash;
-use libmempool::Batch;
+use libmempool::CachedBatch;
 use net_common::Message;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::{Block, Certificate, Payload, Propose, Transaction, View};
 
@@ -10,7 +11,9 @@ pub enum ProtocolMsg {
     /// Leader's new proposal: propose metadata, the block (which
     /// carries only the batch hash), and the batch itself so
     /// followers can persist it without a separate sync round-trip.
-    NewProposal(Propose, Block, Batch<Transaction>),
+    /// `Arc<CachedBatch>` for cheap in-memory clones; wire identical
+    /// to `CachedBatch` via serde-transparent Arc.
+    NewProposal(Propose, Block, Arc<CachedBatch<Transaction>>),
     /// A vote for a proposed block.
     VoteMsg(Certificate, Propose),
     /// Two equivocating proposals from the same leader.

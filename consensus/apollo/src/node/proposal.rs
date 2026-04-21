@@ -1,24 +1,17 @@
-use libmempool::{Batch, BatchHash};
+use libmempool::{BatchHash, CachedBatch};
 use std::sync::Arc;
 use types::apollo::{Block, Propose, ProtocolMsg, Replica, Transaction};
 use types::BlockTrait;
 use super::*;
 
-/// Leader proposes a block wrapping the given batch. Reads the batch
-/// from the local batch store, builds a block that references it by
-/// hash, and broadcasts it (batch inline so followers don't need a
-/// sync round-trip).
-pub async fn do_propose(batch_hash: BatchHash<Transaction>, cx: &mut Context) {
-    let batch = match cx.read_batch(&batch_hash).await {
-        Some(b) => b,
-        None => {
-            log::warn!(
-                "Leader's own batch {:?} missing from store; skipping propose",
-                batch_hash
-            );
-            return;
-        }
-    };
+/// Leader proposes a block wrapping the given batch. The `batch` arg
+/// arrives from the mempool's Processor via the consensus channel as
+/// `Arc<CachedBatch>` -- no rocksdb read needed.
+pub async fn do_propose(
+    batch_hash: BatchHash<Transaction>,
+    batch: Arc<CachedBatch<Transaction>>,
+    cx: &mut Context,
+) {
     let parent = cx.last_seen_block.as_ref();
 
     let mut new_block = Block::with_batch(batch_hash.clone());
@@ -32,16 +25,24 @@ pub async fn do_propose(batch_hash: BatchHash<Transaction>, cx: &mut Context) {
     p.sig.origin = cx.myid();
     p.sign(cx.my_secret_key.as_ref());
 
+    // Hydrate tx hashes BEFORE moving `batch` into the ProtocolMsg.
+    // Cheap thanks to `CachedBatch::tx_hashes` OnceLock-cache (intake
+    // pre-filled on the leader).
+    let tx_hashes = if cx.is_client_apollo_enabled() {
+        Some(Context::hydrate_tx_hashes(batch.as_ref()))
+    } else {
+        None
+    };
+
     let msg = Arc::new(ProtocolMsg::NewProposal(
         p.clone(),
         new_block.clone(),
-        batch.clone(),
+        Arc::clone(&batch),
     ));
     cx.multicast(msg).await;
 
     let block_arc = Arc::new(new_block);
-    if cx.is_client_apollo_enabled() {
-        let tx_hashes = Context::hydrate_tx_hashes(&batch);
+    if let Some(tx_hashes) = tx_hashes {
         cx.multicast_client(Arc::new(p.clone()), block_arc.clone(), tx_hashes)
             .await;
     }
@@ -88,17 +89,10 @@ pub async fn try_receive_proposal(
 }
 
 /// Verify that the batch carried in a proposal / response hashes to
-/// what the block commits to.
-pub fn check_batch_hash(block: &Block, batch: &Batch<Transaction>) -> bool {
-    let serialized = match bincode::serialize(batch) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("Failed to serialize batch for hash check: {}", e);
-            return false;
-        }
-    };
-    let computed: BatchHash<Transaction> = libcrypto::hash::Hash::do_hash(&serialized);
-    computed == block.body.batch_hash
+/// what the block commits to. Free `OnceLock` compare -- the hash was
+/// populated during the wire `Deserialize`.
+pub fn check_batch_hash(block: &Block, batch: &CachedBatch<Transaction>) -> bool {
+    batch.hash() == block.body.batch_hash
 }
 
 /// Called when a proposal has been fully delivered (block + ancestors).

@@ -3,7 +3,7 @@ use config::{ClientId, Node};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
-use libmempool::{Batch, BatchHash, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
 use libstorage::rocksdb::Storage as RocksStore;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -42,14 +42,20 @@ pub struct Context {
     pub consensus_handlers: HashMap<Round, Vec<CancelHandler>>,
     pub client_handlers: HashMap<Round, Vec<CancelHandler>>,
 
-    /// Batch store shared with the per-node Mempool. Leaders read
-    /// batches out of it when proposing; followers write incoming
-    /// batches in when handling proposals.
+    /// Rocksdb fallback for batch reads; writes are fire-and-forget
+    /// background tasks spawned from `persist_batch`.
     pub batch_store: RocksStore,
 
-    /// Batches the mempool has announced as ready; the leader pops
-    /// from the front of this on the tick after `round_leader() == myid`.
-    pub pending_batches: VecDeque<BatchHash<Transaction>>,
+    /// In-memory batch cache shared with the libapollo-mempool
+    /// pipeline. Read consulted on cache-first, write installed here
+    /// before the rocksdb spawn.
+    pub batch_cache: Arc<BatchCache<Transaction>>,
+
+    /// Batches the mempool has announced as ready, paired with the
+    /// `Arc<CachedBatch>` the Processor hands us. The leader pops
+    /// from the front when `round_leader() == myid`; no rocksdb
+    /// round-trip to read its own batch back out.
+    pub pending_batches: VecDeque<(BatchHash<Transaction>, Arc<CachedBatch<Transaction>>)>,
 
     /// Control channel to the mempool -- currently only used for
     /// mempool-synchronizer round-advance notifications.
@@ -62,7 +68,7 @@ pub struct Context {
     // tagged in each entry is the node to ask if a block (or parent) is
     // missing: for NewProposal that's `p.sig.origin` (the leader); for
     // Response/Relay that's the embedded `from` (who just forwarded).
-    pub prop_buf: VecDeque<(Replica, Propose, Block, Batch<Transaction>)>,
+    pub prop_buf: VecDeque<(Replica, Propose, Block, Arc<CachedBatch<Transaction>>)>,
     pub relay_buf: VecDeque<(Replica, Propose)>,
     pub other_buf: VecDeque<ProtocolMsg>,
     pub future_msgs: HashMap<Round, (Replica, Propose)>,
@@ -97,6 +103,7 @@ impl Context {
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
         client_net: TlsReliableSender<ClientId, ClientMsg>,
         batch_store: RocksStore,
+        batch_cache: Arc<BatchCache<Transaction>>,
         tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
         is_apollo_enabled: bool,
     ) -> Self {
@@ -130,6 +137,7 @@ impl Context {
             consensus_handlers: HashMap::default(),
             client_handlers: HashMap::default(),
             batch_store,
+            batch_cache,
             pending_batches: VecDeque::new(),
             tx_consensus_to_mem,
             storage: Storage::new(),
@@ -217,39 +225,50 @@ impl Context {
         }
     }
 
-    /// Persist an incoming batch into the local batch store. Called
-    /// from the proposal / response paths before voting / delivering.
+    /// Install an incoming batch in the cache; enqueue rocksdb write.
+    /// Cache insertion is sync-ordered before the store.write so a
+    /// read in-between still hits the cache. `libstorage::Store::write`
+    /// is a fire-and-forget mpsc send, so `.await` is cheap.
     pub async fn persist_batch(
         &mut self,
         batch_hash: BatchHash<Transaction>,
-        batch: &Batch<Transaction>,
+        batch: Arc<CachedBatch<Transaction>>,
     ) {
+        self.batch_cache.insert(batch_hash.clone(), Arc::clone(&batch));
         let key = batch_hash.as_ref().to_vec();
-        let value = bincode::serialize(batch).expect("Batch serialize");
-        self.batch_store.write(key, value).await;
+        let bytes = bincode::serialize(batch.as_ref()).expect("Batch serialize");
+        self.batch_store.write(key, bytes).await;
     }
 
-    /// Read a batch from storage by hash.
+    /// Read a batch: cache first, rocksdb fallback.
     pub async fn read_batch(
         &mut self,
         batch_hash: &BatchHash<Transaction>,
-    ) -> Option<Batch<Transaction>> {
+    ) -> Option<Arc<CachedBatch<Transaction>>> {
+        if let Some(cached) = self.batch_cache.get(batch_hash) {
+            return Some(cached);
+        }
         let key = batch_hash.as_ref().to_vec();
         match self.batch_store.read(key).await {
-            Ok(Some(bytes)) => bincode::deserialize(&bytes).ok(),
+            Ok(Some(bytes)) => {
+                match bincode::deserialize::<CachedBatch<Transaction>>(&bytes) {
+                    Ok(b) => {
+                        let arc = Arc::new(b);
+                        self.batch_cache.insert(batch_hash.clone(), Arc::clone(&arc));
+                        Some(arc)
+                    }
+                    Err(_) => None,
+                }
+            }
             _ => None,
         }
     }
 
-    /// Compute tx hashes from a batch payload. Leaders feed this into
-    /// `ClientMsg::NewBlock` at propose time (special-client mode);
-    /// followers feed it at commit time.
-    pub fn hydrate_tx_hashes(batch: &Batch<Transaction>) -> Vec<Hash<Transaction>> {
-        batch
-            .payload
-            .iter()
-            .map(|tx| Hash::<Transaction>::ser_and_hash(tx))
-            .collect()
+    /// Compute tx hashes from a batch payload. `CachedBatch::tx_hashes`
+    /// is `OnceLock`-cached: free on the leader (pre-filled by the
+    /// mempool intake path), one-time SHA256 pass on followers.
+    pub fn hydrate_tx_hashes(batch: &CachedBatch<Transaction>) -> Vec<Hash<Transaction>> {
+        batch.tx_hashes().to_vec()
     }
 
     /// Serialize `msg` once and stash the returned handlers under the

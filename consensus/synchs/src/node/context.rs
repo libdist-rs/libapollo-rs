@@ -2,7 +2,7 @@ use bytes::Bytes;
 use config::{ClientId, Node};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::{hash::Hash, ed25519, secp256k1, Keypair, PublicKey};
-use libmempool::{BatchHash, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
 use libstorage::rocksdb::Storage as RocksStore;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -32,14 +32,21 @@ pub struct Context {
     pub client_handlers: HashMap<Height, Vec<CancelHandler>>,
 
     /// Handle to the shared batch store (`libstorage::Store` via
-    /// rocksdb). Receivers write incoming batches here so `on_commit`
-    /// can hydrate transaction hashes for client notifications.
+    /// rocksdb). Durable-write fallback; reads fall through here on
+    /// a `batch_cache` miss.
     pub batch_store: RocksStore,
 
+    /// In-memory, Arc-keyed batch cache shared with the libapollo-
+    /// mempool pipeline. `read_batch` consults this first; `persist_batch`
+    /// installs here before firing a background rocksdb write.
+    pub batch_cache: Arc<BatchCache<Transaction>>,
+
     /// Batches the mempool has announced as ready, waiting for this
-    /// node to become leader / unblock. The reactor's select loop
-    /// pushes to the back; `do_propose` pops from the front.
-    pub pending_batches: VecDeque<BatchHash<Transaction>>,
+    /// node to become leader / unblock. Each entry is the `(hash,
+    /// Arc<batch>)` pair the mempool's Processor forwarded -- the
+    /// leader propses straight from the Arc, with no `read_batch`
+    /// round-trip.
+    pub pending_batches: VecDeque<(BatchHash<Transaction>, Arc<CachedBatch<Transaction>>)>,
 
     /// Control channel to the mempool. Currently only used to report
     /// round advancement so the synchronizer can GC old entries.
@@ -74,6 +81,7 @@ impl Context {
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
         client_net: TlsReliableSender<ClientId, ClientMsg>,
         batch_store: RocksStore,
+        batch_cache: Arc<BatchCache<Transaction>>,
         tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Height, Transaction>>,
     ) -> Self {
         let genesis_arc = Arc::new(GENESIS_BLOCK);
@@ -89,6 +97,7 @@ impl Context {
             consensus_handlers: HashMap::default(),
             client_handlers: HashMap::default(),
             batch_store,
+            batch_cache,
             pending_batches: VecDeque::new(),
             tx_consensus_to_mem,
             num_nodes: config.num_nodes,
@@ -185,28 +194,46 @@ impl Context {
         }
     }
 
-    /// Persist an incoming `Batch` into the local batch store so
-    /// `on_commit` can later hydrate tx hashes from it for client
-    /// notifications.
+    /// Install an incoming `Batch` in the in-memory cache and enqueue
+    /// a rocksdb write. Cache insertion is sync-ordered before the
+    /// store.write so a read between the two still hits the cache.
+    /// `libstorage::Store::write` is already a fire-and-forget mpsc
+    /// send into the rocksdb writer task, so `.await`-ing it here is
+    /// effectively free -- no detached `tokio::spawn` needed.
     pub async fn persist_batch(
         &mut self,
         batch_hash: BatchHash<Transaction>,
-        batch: &libmempool::Batch<Transaction>,
+        batch: Arc<CachedBatch<Transaction>>,
     ) {
+        self.batch_cache.insert(batch_hash.clone(), Arc::clone(&batch));
         let key = batch_hash.as_ref().to_vec();
-        let value = bincode::serialize(batch).expect("Batch serialize");
-        self.batch_store.write(key, value).await;
+        let bytes = bincode::serialize(batch.as_ref()).expect("Batch serialize");
+        self.batch_store.write(key, bytes).await;
     }
 
-    /// Read a batch from storage by hash. Returns the deserialized
-    /// batch or `None` if we don't have it.
+    /// Read a batch by hash: in-memory cache first (99%+ of hits on
+    /// the hot path), rocksdb fallback for crash recovery / evicted
+    /// batches. A rocksdb hit is re-installed in the cache so
+    /// subsequent reads are free.
     pub async fn read_batch(
         &mut self,
         batch_hash: &BatchHash<Transaction>,
-    ) -> Option<libmempool::Batch<Transaction>> {
+    ) -> Option<Arc<CachedBatch<Transaction>>> {
+        if let Some(cached) = self.batch_cache.get(batch_hash) {
+            return Some(cached);
+        }
         let key = batch_hash.as_ref().to_vec();
         match self.batch_store.read(key).await {
-            Ok(Some(bytes)) => bincode::deserialize(&bytes).ok(),
+            Ok(Some(bytes)) => {
+                match bincode::deserialize::<CachedBatch<Transaction>>(&bytes) {
+                    Ok(b) => {
+                        let arc = Arc::new(b);
+                        self.batch_cache.insert(batch_hash.clone(), Arc::clone(&arc));
+                        Some(arc)
+                    }
+                    Err(_) => None,
+                }
+            }
             _ => None,
         }
     }

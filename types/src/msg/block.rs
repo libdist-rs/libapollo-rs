@@ -1,5 +1,5 @@
 use libcrypto::hash::Hash;
-use libmempool::{Batch, BatchHash};
+use libmempool::{BatchHash, CachedBatch};
 use net_common::Message;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -84,7 +84,7 @@ pub const GENESIS_BLOCK: Block = Block {
         blame_certificates: Vec::new(),
     },
     body: Body {
-        batch_hash: Hash::<Batch<Transaction>>::EMPTY_HASH,
+        batch_hash: Hash::<CachedBatch<Transaction>>::EMPTY_HASH,
     },
     hash: Hash::<Block>::EMPTY_HASH,
 };

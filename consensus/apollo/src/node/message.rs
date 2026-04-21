@@ -1,4 +1,4 @@
-use libmempool::Batch;
+use libmempool::CachedBatch;
 use std::sync::Arc;
 use types::apollo::{Block, Propose, ProtocolMsg, Replica, Transaction};
 
@@ -60,7 +60,7 @@ pub fn handle_message(message: ProtocolMsg, cx: &mut Context) {
 pub async fn delivery_check(
     sender: Replica,
     p: Propose,
-    block_and_batch: Option<(Block, Batch<Transaction>)>,
+    block_and_batch: Option<(Block, Arc<CachedBatch<Transaction>>)>,
     cx: &mut Context,
 ) {
     if cx.prop_chain_by_round.contains_key(&p.round) {
@@ -74,13 +74,12 @@ pub async fn delivery_check(
                 log::warn!("Block hash mismatch in proposal");
                 return;
             }
-            if !crate::node::proposal::check_batch_hash(&b, &batch) {
+            if !crate::node::proposal::check_batch_hash(&b, batch.as_ref()) {
                 log::warn!("Batch hash mismatch; dropping proposal");
                 return;
             }
-            // Persist the batch so `on_commit` can hydrate it later
-            // for client notifications.
-            cx.persist_batch(b.body.batch_hash.clone(), &batch).await;
+            // Persist: cache insert + enqueue rocksdb write.
+            cx.persist_batch(b.body.batch_hash.clone(), batch).await;
             Arc::new(b)
         }
         None => {

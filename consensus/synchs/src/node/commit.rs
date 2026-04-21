@@ -22,18 +22,16 @@ pub async fn on_commit(p: Arc<Propose>, cx: &mut Context) {
     cx.last_committed_block_ht = b.header.height;
     cx.storage.add_committed_block(b.clone());
 
-    // Hydrate tx hashes from the referenced batch. `persist_batch` ran
-    // when the proposal was delivered, so absence here would mean a
-    // rocksdb fault -- log + skip rather than panic.
+    // Hydrate tx hashes from the referenced batch. On the leader the
+    // hashes are OnceLock-pre-filled by the mempool's intake pipeline
+    // (free read). On followers they're filled lazily on first call
+    // here. `read_batch` hits the in-memory cache first and only
+    // falls through to rocksdb on eviction / crash recovery.
     let tx_hashes: Vec<Hash<Transaction>> = match cx.read_batch(&b.body.batch_hash).await {
-        Some(batch) => batch
-            .payload
-            .iter()
-            .map(|tx| Hash::<Transaction>::ser_and_hash(tx))
-            .collect(),
+        Some(batch) => batch.tx_hashes().to_vec(),
         None => {
             log::warn!(
-                "Batch {:?} missing from store at commit time; pushing an empty client notification",
+                "Batch {:?} missing from cache+store at commit time; pushing an empty client notification",
                 b.body.batch_hash
             );
             Vec::new()
