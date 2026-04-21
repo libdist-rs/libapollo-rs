@@ -74,7 +74,12 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_REGION = "us-east-1"
 DEFAULT_INSTANCE_TYPE = "c6g.large"   # ARM Graviton2, 2 vCPU, 4 GB RAM
 DEFAULT_COUNT = 7
-DEFAULT_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+# Glob matching the latest Amazon Linux 2023 ARM AMI name. We used to
+# resolve this via the SSM parameter store (`/aws/service/ami-amazon-
+# linux-latest/...`), but that requires `ssm:GetParameter` which is
+# not in the default EC2-admin IAM profile. `ec2:DescribeImages` is,
+# so we sort by CreationDate instead.
+DEFAULT_AMI_NAME_GLOB = "al2023-ami-2023.*-kernel-*-arm64"
 
 # Rocksdb + the rest of the Rust build want clang + tool-chain bits.
 # Kept in one string so we can curl|bash it on every node.
@@ -117,16 +122,16 @@ def _my_public_ip() -> str:
         return r.read().decode().strip() + "/32"
 
 
-def _tag_spec(prefix: str, extra: dict[str, str] | None = None):
+def _tag_spec(prefix: str, *resource_types: str, extra: dict[str, str] | None = None):
+    """Build a TagSpecifications list scoped to the given resource types.
+
+    Each EC2 API call only accepts a specific subset of resource types
+    in its TagSpecifications, so we can't pass a universal list --
+    CreateVpc rejects `subnet`, RunInstances rejects `vpc`, etc.
+    """
     tags = [{"Key": "Name", "Value": f"libapollo-bench-{prefix}"}]
     tags += [{"Key": k, "Value": v} for k, v in (extra or {}).items()]
-    return [{"ResourceType": "vpc", "Tags": tags},
-            {"ResourceType": "subnet", "Tags": tags},
-            {"ResourceType": "internet-gateway", "Tags": tags},
-            {"ResourceType": "route-table", "Tags": tags},
-            {"ResourceType": "security-group", "Tags": tags},
-            {"ResourceType": "instance", "Tags": tags},
-            {"ResourceType": "volume", "Tags": tags}]
+    return [{"ResourceType": rt, "Tags": tags} for rt in resource_types]
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +185,6 @@ def provision(ctx: Context,
 
     session, region = _boto(region)
     ec2 = session.client("ec2")
-    ssm = session.client("ssm")
 
     # Timestamped prefix keeps multiple parallel benches separable in the
     # console, and scoped by calendar minute in case of retries.
@@ -189,10 +193,22 @@ def provision(ctx: Context,
     state["region"] = region
 
     # --- AMI lookup (latest Amazon Linux 2023 ARM) -----------------------
-    print(f"[provision] looking up AMI ({DEFAULT_AMI_PARAM})")
-    ami_id = ssm.get_parameter(Name=DEFAULT_AMI_PARAM)["Parameter"]["Value"]
+    # DescribeImages instead of SSM GetParameter so this works under
+    # an EC2-only IAM policy (no ssm:GetParameter required).
+    print(f"[provision] looking up AMI via describe_images ({DEFAULT_AMI_NAME_GLOB})")
+    imgs = ec2.describe_images(
+        Owners=["amazon"],
+        Filters=[
+            {"Name": "name", "Values": [DEFAULT_AMI_NAME_GLOB]},
+            {"Name": "state", "Values": ["available"]},
+        ],
+    )["Images"]
+    if not imgs:
+        raise RuntimeError(f"No AMI matched {DEFAULT_AMI_NAME_GLOB}")
+    imgs.sort(key=lambda i: i["CreationDate"])
+    ami_id = imgs[-1]["ImageId"]
     state["ami_id"] = ami_id
-    print(f"           AMI = {ami_id}")
+    print(f"           AMI = {ami_id}  ({imgs[-1]['Name']})")
 
     # --- Key pair --------------------------------------------------------
     key_name = f"libapollo-bench-{prefix}"
@@ -208,7 +224,7 @@ def provision(ctx: Context,
     # --- VPC + subnet + IGW + route --------------------------------------
     print("[provision] creating VPC 10.42.0.0/16")
     vpc = ec2.create_vpc(CidrBlock="10.42.0.0/16",
-                         TagSpecifications=_tag_spec(prefix))["Vpc"]
+                         TagSpecifications=_tag_spec(prefix, "vpc"))["Vpc"]
     state["vpc_id"] = vpc["VpcId"]
     ec2.modify_vpc_attribute(VpcId=vpc["VpcId"], EnableDnsHostnames={"Value": True})
     _save_state(state)
@@ -217,18 +233,19 @@ def provision(ctx: Context,
     print(f"[provision] creating subnet in AZ {az}")
     subnet = ec2.create_subnet(VpcId=vpc["VpcId"], CidrBlock="10.42.1.0/24",
                                AvailabilityZone=az,
-                               TagSpecifications=_tag_spec(prefix))["Subnet"]
+                               TagSpecifications=_tag_spec(prefix, "subnet"))["Subnet"]
     state["subnet_id"] = subnet["SubnetId"]
     state["az"] = az
     ec2.modify_subnet_attribute(SubnetId=subnet["SubnetId"],
                                 MapPublicIpOnLaunch={"Value": True})
 
-    igw = ec2.create_internet_gateway(TagSpecifications=_tag_spec(prefix))["InternetGateway"]
+    igw = ec2.create_internet_gateway(
+        TagSpecifications=_tag_spec(prefix, "internet-gateway"))["InternetGateway"]
     state["igw_id"] = igw["InternetGatewayId"]
     ec2.attach_internet_gateway(VpcId=vpc["VpcId"], InternetGatewayId=igw["InternetGatewayId"])
 
     rt = ec2.create_route_table(VpcId=vpc["VpcId"],
-                                TagSpecifications=_tag_spec(prefix))["RouteTable"]
+                                TagSpecifications=_tag_spec(prefix, "route-table"))["RouteTable"]
     state["rt_id"] = rt["RouteTableId"]
     ec2.create_route(RouteTableId=rt["RouteTableId"],
                      DestinationCidrBlock="0.0.0.0/0",
@@ -244,7 +261,7 @@ def provision(ctx: Context,
         GroupName=f"libapollo-bench-{prefix}",
         Description="libapollo-rs benchmark nodes",
         VpcId=vpc["VpcId"],
-        TagSpecifications=_tag_spec(prefix))
+        TagSpecifications=_tag_spec(prefix, "security-group"))
     state["sg_id"] = sg["GroupId"]
 
     ec2.authorize_security_group_ingress(
@@ -275,7 +292,7 @@ def provision(ctx: Context,
             "Ebs": {"VolumeSize": 16, "VolumeType": "gp3",
                     "DeleteOnTermination": True},
         }],
-        TagSpecifications=_tag_spec(prefix))
+        TagSpecifications=_tag_spec(prefix, "instance", "volume"))
 
     ids = [i["InstanceId"] for i in resp["Instances"]]
     state["instance_ids"] = ids
@@ -434,6 +451,15 @@ def _gen_local_configs(state: dict[str, Any], run_dir: pathlib.Path,
     mempool_base = base_port + 200
     client_listen = base_port + 275
 
+    instances = state["instances"]
+
+    # All peers' private IPs go into every node's cert SAN so TLS
+    # handshakes between `10.x.y.z` peers pass rustls's SAN check.
+    # The stress-test client lives on node 0, so its cert reuses node
+    # 0's private IP as the sole client SAN.
+    node_ip_csv = ",".join(i["private_ip"] for i in instances)
+    client_ip_csv = instances[0]["private_ip"]
+
     remote_dir = f"bench/{run_dir.name}"
     c0.run(f"rm -rf {remote_dir} && mkdir -p {remote_dir}", hide=True)
     c0.run(
@@ -442,6 +468,8 @@ def _gen_local_configs(state: dict[str, Any], run_dir: pathlib.Path,
         f"--base_port {base_port} --client_base_port {cli_base} "
         f"--mempool_base_port {mempool_base} "
         f"--client_listen_port {client_listen} "
+        f"--node_ips {node_ip_csv} "
+        f"--client_ips {client_ip_csv} "
         f"--payload 0 --target {remote_dir}",
         hide=True,
     )
@@ -478,32 +506,42 @@ def _gen_local_configs(state: dict[str, Any], run_dir: pathlib.Path,
     # client_listen_port.
     client_host = instances[0]["private_ip"]
 
-    # Rewrite per-node configs: replace 127.0.0.1 in net_map and
-    # client_net_map with the real private IPs.
-    import re as _re
+    # Rewrite per-node configs:
+    #   - net_map / mempool_net_map / client_net_map get real IPs,
+    #   - cert paths are rewritten from genconfig's target dir to the
+    #     fixed runtime location each node reads at start-up
+    #     (`/home/ec2-user/bench/run/{node,root-cert}.*.pem`).
+    runtime_cert = "/home/ec2-user/bench/run/node.chain.pem"
+    runtime_key = "/home/ec2-user/bench/run/node.key.pem"
+    runtime_root = "/home/ec2-user/bench/run/root-cert.pem"
     for i in range(n):
         p = local_dir / f"nodes-{i}.json"
         cfg = json.loads(p.read_text())
-        # Rewrite net_map: node j -> instances[j].private_ip
+        # IPs
         for j in range(n):
-            port = base_port + j
-            cfg["net_map"][str(j)] = f"{instances[j]['private_ip']}:{port}"
+            cfg["net_map"][str(j)] = f"{instances[j]['private_ip']}:{base_port + j}"
         if "mempool_net_map" in cfg:
             for j in range(n):
-                port = mempool_base + j
-                cfg["mempool_net_map"][str(j)] = f"{instances[j]['private_ip']}:{port}"
+                cfg["mempool_net_map"][str(j)] = \
+                    f"{instances[j]['private_ip']}:{mempool_base + j}"
         if "client_net_map" in cfg:
-            # Single-client stress-test topology: client id 0 on node 0's host.
             cfg["client_net_map"] = {"0": f"{client_host}:{client_listen}"}
+        # Cert paths
+        cfg["my_cert_path"] = runtime_cert
+        cfg["my_cert_key_path"] = runtime_key
+        cfg["root_cert_path"] = runtime_root
         p.write_text(json.dumps(cfg) + "\n")
 
-    # Rewrite client.json: its net_map (which tells client where the
-    # servers are) + my_listen_addr (where it binds).
+    # Rewrite client.json: net_map, my_listen_addr, and cert paths
+    # to the runtime locations the remote host will have post-scp.
     p = local_dir / "client.json"
     cli = json.loads(p.read_text())
     for j in range(n):
         cli["net_map"][str(j)] = f"{instances[j]['private_ip']}:{cli_base + j}"
     cli["my_listen_addr"] = f"0.0.0.0:{client_listen}"
+    cli["my_cert_path"] = "/home/ec2-user/bench/run/client.chain.pem"
+    cli["my_cert_key_path"] = "/home/ec2-user/bench/run/client.key.pem"
+    cli["root_cert_path"] = runtime_root
     p.write_text(json.dumps(cli) + "\n")
 
     # Also write ip_file / cli_ip_file with real IPs for `--ip` arg.
@@ -537,13 +575,19 @@ def configure(ctx: Context,
     run_dir = STATE_DIR / "runs" / f"{protocol}-n{n}-{stamp}"
     info = _gen_local_configs(state, run_dir, protocol, n, f, block_size, base_port)
 
-    # Push each node its own config + certs.
+    # Pull the generated root-cert.pem so we can push it alongside each
+    # node's identity cert -- it's the shared trust store.
+    c0 = conns[0]
+    c0.get(f"bench/{run_dir.name}/root-cert.pem", str(run_dir / "root-cert.pem"))
+
+    # Push each node its own config + certs (bundled into bench/run/).
     import concurrent.futures as cf
     def _push(c, node_id):
         c.run(f"mkdir -p bench/run", hide=True)
         c.put(str(run_dir / f"nodes-{node_id}.json"), "bench/run/nodes.json")
         c.put(str(run_dir / f"node-{node_id}.chain.pem"), "bench/run/node.chain.pem")
         c.put(str(run_dir / f"node-{node_id}.key.pem"), "bench/run/node.key.pem")
+        c.put(str(run_dir / "root-cert.pem"), "bench/run/root-cert.pem")
         c.put(str(run_dir / "ip_file"), "bench/run/ip_file")
         c.put(str(run_dir / "cli_ip_file"), "bench/run/cli_ip_file")
 
@@ -570,7 +614,13 @@ def configure(ctx: Context,
 def run(ctx: Context, protocol: str = "artemis",
         total_txs: int = 50000, window: int = 10000,
         bootstrap_secs: int = 12, delta: int = 50):
-    """Launch nodes, then client, collect throughput + latency."""
+    """Launch nodes in tmux, then client, collect throughput + latency.
+
+    Each node runs inside a detached tmux session named `node`. The
+    session survives SSH disconnect and can be re-attached via
+    `ssh ...; tmux attach -t node`. The log tee'd into `node.log`
+    gives fab-logs-style access too.
+    """
     state = _load_state()
     info = state.get("run")
     if not info:
@@ -579,56 +629,56 @@ def run(ctx: Context, protocol: str = "artemis",
     conns = _connections(state)
     n = len(state["instances"])
 
-    # --- Patch config paths to relative paths inside bench/run -----------
-    # (cleaner to re-uplaod than sed on the remote side -- already done
-    # by configure if it filled in absolute paths; check / TODO)
-
-    # Kill any straggler from a previous run.
-    print("[run] killing any prior node process on each host...")
-    _run_parallel(conns, f"pkill -f node-{protocol} || true; pkill -f client-{protocol} || true",
-                  warn=True)
+    # Kill any prior tmux session + stale rocksdb lock before relaunch.
+    print("[run] killing any prior node tmux + rocksdb lock...")
+    _run_parallel(
+        conns,
+        "tmux kill-session -t node 2>/dev/null || true; "
+        "tmux kill-session -t client 2>/dev/null || true; "
+        f"pkill -9 -f node-{protocol} 2>/dev/null || true; "
+        "rm -rf bench/run/node-*.rocksdb",
+        warn=True,
+    )
 
     # --- Launch nodes ----------------------------------------------------
-    print(f"[run] launching node-{protocol} on {n} hosts...")
+    print(f"[run] launching node-{protocol} in tmux on {n} hosts...")
+    special = "-s" if protocol in ("artemis", "apollo") else ""
     def _launch(ci):
-        c, i = ci
-        # nohup + detach + log to file. `--sleep` gives bootstrap window
-        # for all nodes to bind before any one starts sending.
+        c, _i = ci
+        # `tmux new-session -d` starts detached; the shell-c command runs
+        # inside a clean shell scope. Pipes are fine inside tmux so we
+        # keep the `2>&1 | tee` to capture the same log fab-logs reads.
         cmd = (
-            f"cd $HOME && "
-            f"RUST_LOG=info "
-            f"nohup libapollo-rs/target/release/node-{protocol} "
-            f"-c bench/run/nodes.json "
-            f"-i bench/run/ip_file "
-            f"--sleep {bootstrap_secs} --delta {delta} "
-            f"{'-s' if protocol in ('artemis', 'apollo') else ''} "
-            f">bench/run/node.log 2>&1 < /dev/null &"
-            f" disown"
+            f'cd $HOME && tmux new-session -d -s node -- bash -c '
+            f'"RUST_LOG=info libapollo-rs/target/release/node-{protocol} '
+            f'-c bench/run/nodes.json -i bench/run/ip_file '
+            f'--sleep {bootstrap_secs} --delta {delta} {special} '
+            f'2>&1 | tee bench/run/node.log"'
         )
         c.run(cmd, pty=False, hide=True)
     import concurrent.futures as cf
+    t0 = time.monotonic()
     with cf.ThreadPoolExecutor(max_workers=n) as ex:
         list(ex.map(_launch, [(conns[i], i) for i in range(n)]))
+    print(f"       all launched in {time.monotonic()-t0:.1f}s")
 
     # --- Launch client on node 0 -----------------------------------------
-    print(f"[run] waiting {bootstrap_secs}s for nodes to bind, then client...")
-    time.sleep(bootstrap_secs)
+    print(f"[run] waiting {bootstrap_secs}s for nodes to bind...")
+    time.sleep(bootstrap_secs + 3)       # small margin for tcp accept
     c0 = conns[info["client_node"]]
-    print(f"[run] launching client on node 0 (tx={total_txs}, window={window})...")
+    print(f"[run] running client on node 0 (tx={total_txs}, window={window})...")
+    t0 = time.monotonic()
     r = c0.run(
-        f"cd $HOME && "
-        f"RUST_LOG=info "
+        f"cd $HOME && RUST_LOG=info "
         f"libapollo-rs/target/release/client-{protocol} "
-        f"-c bench/run/client.json "
-        f"-i bench/run/cli_ip_file "
-        f"-m {total_txs} -w {window} "
-        f"2>&1 | tee bench/run/client.log",
+        f"-c bench/run/client.json -i bench/run/cli_ip_file "
+        f"-m {total_txs} -w {window} 2>&1 | tee bench/run/client.log",
         hide=False, warn=True,
     )
+    print(f"       client finished in {time.monotonic()-t0:.1f}s (exit={r.exited})")
 
     # Parse throughput + latency from DP[...] lines.
-    throughput = None
-    latency = None
+    throughput = latency = None
     for line in r.stdout.splitlines():
         m = re.search(r"DP\[Throughput\]:\s*([\d.]+)", line)
         if m: throughput = float(m.group(1))
@@ -641,17 +691,323 @@ def run(ctx: Context, protocol: str = "artemis",
               f"| latency = {latency:.2f} ms")
     else:
         print("[run] client did not print DP stats. Check bench/run/client.log on node 0.")
+    print("[run] nodes still running (tmux session `node`). `fab stop` to kill.")
 
-    print("[run] nodes still running so you can poke at them.")
-    print("      `fab logs --node 0` to tail, `fab stop` to kill nodes.")
+
+@task
+def bench(ctx: Context,
+          protocols: str = "artemis,apollo,synchs,optsync",
+          configs: str = "3:1,7:3",
+          runs: int = 3,
+          block_size: int = 400,
+          total_txs: int = 50000,
+          window: int = 10000,
+          bootstrap_secs: int = 12,
+          delta: int = 50,
+          tag: str | None = None):
+    """Full benchmark sweep: every protocol x every (n,f) x `runs` runs.
+
+    Writes one timestamped tree under `state/results/<stamp>/`:
+        manifest.json            -- config (block_size, runs, env, ...)
+        <proto>-n<n>-f<f>/
+            run-0/client.log     -- raw client stdout/stderr
+            run-0/throughput_ms.json  -- parsed {throughput_tx_s, latency_ms}
+            run-1/...
+            ...
+
+    `fab plot` reads the same directory back and renders PNGs. Keeping
+    the raw logs alongside the parsed numbers means anyone can
+    re-verify the DP[Throughput]/DP[Latency] we plotted.
+
+    Args:
+        protocols: comma-separated protocol names.
+        configs:   comma-separated "n:f" pairs. Each config triggers a
+                   fresh `fab configure` before its runs.
+        runs:      number of runs per (protocol, config) cell.
+        tag:       optional label appended to the results dir name.
+    """
+    state = _load_state()
+    conns = _connections(state)
+
+    stamp = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    suffix = f"-{tag}" if tag else ""
+    results_root = STATE_DIR / "results" / f"{stamp}{suffix}"
+    results_root.mkdir(parents=True, exist_ok=True)
+
+    config_pairs = []
+    for spec in configs.split(","):
+        n_str, f_str = spec.strip().split(":")
+        config_pairs.append((int(n_str), int(f_str)))
+
+    protocols_list = [p.strip() for p in protocols.split(",") if p.strip()]
+
+    manifest = {
+        "stamp": stamp,
+        "tag": tag,
+        "block_size": block_size,
+        "total_txs": total_txs,
+        "window": window,
+        "bootstrap_secs": bootstrap_secs,
+        "delta": delta,
+        "runs_per_cell": runs,
+        "protocols": protocols_list,
+        "configs": [f"n={n}/f={f}" for n, f in config_pairs],
+        "env": {
+            "region": state.get("region"),
+            "az": state.get("az"),
+            "instance_type": "c6g.large",
+            "instance_count": len(state.get("instances", [])),
+            "ami": state.get("ami_id"),
+        },
+    }
+    (results_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+    for (n, f) in config_pairs:
+        # One `configure` per (n,f) -- the cert SAN list is the same
+        # across protocols, so we reuse the same genconfig output for
+        # every protocol at this (n,f).
+        print(f"\n[bench] configure n={n} f={f}")
+        configure(ctx, protocol="artemis", n=n, f=f, block_size=block_size)
+
+        for proto in protocols_list:
+            cell_dir = results_root / f"{proto}-n{n}-f{f}"
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n[bench] {proto} n={n} f={f}  ({runs} runs)")
+            for r in range(runs):
+                run_dir = cell_dir / f"run-{r}"
+                run_dir.mkdir(exist_ok=True)
+
+                # Launch-via-tmux + run client synchronously: _run_one
+                # is a small helper that returns (throughput, latency,
+                # raw_client_log). We'd like to keep it close to the
+                # existing `run` task's body; call it inline to keep a
+                # single shape.
+                tp, lat, raw = _run_one(
+                    conns, proto, n,
+                    total_txs=total_txs, window=window,
+                    bootstrap_secs=bootstrap_secs, delta=delta,
+                )
+
+                (run_dir / "client.log").write_text(raw)
+                (run_dir / "throughput_ms.json").write_text(json.dumps({
+                    "protocol": proto, "n": n, "f": f, "run": r,
+                    "throughput_tx_s": tp,
+                    "latency_ms": lat,
+                }, indent=2) + "\n")
+                print(f"       run {r}: {tp:.0f} tx/s  |  {lat:.1f} ms"
+                      if tp is not None
+                      else f"       run {r}: FAILED")
+
+    # Drop a pointer to the latest sweep so `fab plot` can find it
+    # without an arg.
+    (STATE_DIR / "results" / "latest").write_text(str(results_root.name) + "\n")
+    print(f"\n[bench] done. results at {results_root}")
+
+
+def _run_one(conns, protocol, n, *, total_txs, window, bootstrap_secs, delta):
+    """Core launch/run/collect for one measurement. Returns
+    (throughput or None, latency or None, raw client.log text)."""
+    # Kill stragglers + wipe rocksdb locks (first n of N provisioned
+    # instances are the active ones; others are idle at this config).
+    _run_parallel(
+        conns,
+        "tmux kill-session -t node 2>/dev/null || true; "
+        "tmux kill-session -t client 2>/dev/null || true; "
+        f"pkill -9 -f node-{protocol} 2>/dev/null || true; "
+        "rm -rf bench/run/node-*.rocksdb",
+        warn=True,
+    )
+
+    # Launch node-<protocol> on the active N instances only.
+    special = "-s" if protocol in ("artemis", "apollo") else ""
+    active = conns[:n]
+    def _launch(c):
+        cmd = (
+            f'cd $HOME && tmux new-session -d -s node -- bash -c '
+            f'"RUST_LOG=info libapollo-rs/target/release/node-{protocol} '
+            f'-c bench/run/nodes.json -i bench/run/ip_file '
+            f'--sleep {bootstrap_secs} --delta {delta} {special} '
+            f'2>&1 | tee bench/run/node.log"'
+        )
+        c.run(cmd, pty=False, hide=True)
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=len(active)) as ex:
+        list(ex.map(_launch, active))
+
+    time.sleep(bootstrap_secs + 3)
+
+    # Client on node 0; capture full stdout for the log archive.
+    c0 = active[0]
+    r = c0.run(
+        f"cd $HOME && RUST_LOG=info "
+        f"libapollo-rs/target/release/client-{protocol} "
+        f"-c bench/run/client.json -i bench/run/cli_ip_file "
+        f"-m {total_txs} -w {window}",
+        hide=True, warn=True,
+    )
+    raw = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+
+    tp = lat = None
+    for line in raw.splitlines():
+        m = re.search(r"DP\[Throughput\]:\s*([\d.]+)", line)
+        if m: tp = float(m.group(1))
+        m = re.search(r"DP\[Latency\]:\s*([\d.]+)", line)
+        if m: lat = float(m.group(1))
+    return tp, lat, raw
+
+
+@task
+def plot(ctx: Context, results: str | None = None,
+         out_dir: str = "../benchmarks"):
+    """Parse raw client.logs from a `fab bench` sweep and render PNGs.
+
+    Reads each `throughput_ms.json` under the sweep's cell directories
+    (falling back to re-parsing `client.log` if the JSON is missing),
+    aggregates across runs, and writes three PNGs plus a CSV summary to
+    `out_dir` (default `benchmarks/` in the repo root).
+
+    Args:
+        results: specific sweep directory name under `state/results/`;
+                 defaults to the contents of `state/results/latest`.
+        out_dir: path where plots + summary CSV land.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if results is None:
+        latest_f = STATE_DIR / "results" / "latest"
+        if not latest_f.exists():
+            raise RuntimeError("No `state/results/latest` pointer. Run `fab bench` first.")
+        results = latest_f.read_text().strip()
+
+    results_dir = STATE_DIR / "results" / results
+    if not results_dir.is_dir():
+        raise RuntimeError(f"Results dir not found: {results_dir}")
+
+    manifest = json.loads((results_dir / "manifest.json").read_text())
+    protocols = manifest["protocols"]
+    configs = manifest["configs"]       # e.g. ['n=3/f=1', 'n=7/f=3']
+
+    # Aggregate: {(proto, config_label): {tx_s: [runs...], ms: [runs...]}}
+    agg: dict[tuple[str, str], dict[str, list[float]]] = {}
+    for cell in sorted(results_dir.iterdir()):
+        if not cell.is_dir() or "-n" not in cell.name:
+            continue
+        # cell.name == "<proto>-n<n>-f<f>"
+        proto, nf = cell.name.split("-n", 1)
+        n_str, f_str = nf.split("-f", 1)
+        label = f"n={n_str}/f={f_str}"
+        key = (proto, label)
+        agg.setdefault(key, {"tx_s": [], "ms": []})
+        for run_sub in sorted(cell.iterdir()):
+            jp = run_sub / "throughput_ms.json"
+            if jp.exists():
+                d = json.loads(jp.read_text())
+                if d.get("throughput_tx_s") is not None:
+                    agg[key]["tx_s"].append(d["throughput_tx_s"])
+                if d.get("latency_ms") is not None:
+                    agg[key]["ms"].append(d["latency_ms"])
+
+    # `out_dir` is resolved relative to the scripts/ directory -- so the
+    # default `../benchmarks` lands in the repo root's `benchmarks/`.
+    out_path = pathlib.Path(out_dir)
+    if not out_path.is_absolute():
+        out_path = (HERE / out_dir).resolve()
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # --- CSV summary ------------------------------------------------------
+    csv_lines = ["protocol,config,runs,throughput_min,throughput_median,throughput_max,latency_min,latency_median,latency_max"]
+    def _stats(xs):
+        xs = sorted(xs)
+        if not xs: return (0, 0, 0)
+        return (xs[0], xs[len(xs)//2], xs[-1])
+    for (proto, label), d in sorted(agg.items()):
+        tp = _stats(d["tx_s"])
+        la = _stats(d["ms"])
+        csv_lines.append(f"{proto},{label},{len(d['tx_s'])},"
+                         f"{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},"
+                         f"{la[0]:.2f},{la[1]:.2f},{la[2]:.2f}")
+    (out_path / "summary.csv").write_text("\n".join(csv_lines) + "\n")
+
+    # --- Plots ------------------------------------------------------------
+    # Consistent colour mapping per protocol; sorted for legend stability.
+    palette = {
+        "apollo":  "#4c72b0",
+        "artemis": "#dd8452",
+        "synchs":  "#55a467",
+        "optsync": "#8172b3",
+    }
+    proto_order = [p for p in ["apollo", "artemis", "synchs", "optsync"] if p in protocols]
+
+    def _grouped_bar(metric: str, ylabel: str, fname: str, logy: bool):
+        """Grouped bar chart: x=config, groups=proto, bar=median, errorbars=min/max."""
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
+        n_groups = len(configs)
+        bar_w = 0.8 / max(1, len(proto_order))
+        x = np.arange(n_groups)
+
+        for idx, proto in enumerate(proto_order):
+            medians = []
+            errs_low = []
+            errs_high = []
+            for cfg in configs:
+                vals = agg.get((proto, cfg), {}).get(metric, [])
+                if vals:
+                    vals_s = sorted(vals)
+                    med = vals_s[len(vals_s)//2]
+                    medians.append(med)
+                    errs_low.append(med - vals_s[0])
+                    errs_high.append(vals_s[-1] - med)
+                else:
+                    medians.append(0)
+                    errs_low.append(0)
+                    errs_high.append(0)
+            offset = (idx - (len(proto_order) - 1) / 2) * bar_w
+            ax.bar(x + offset, medians, bar_w, color=palette.get(proto, "gray"),
+                   label=proto, yerr=[errs_low, errs_high], capsize=3,
+                   error_kw={"alpha": 0.7, "linewidth": 1})
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(configs)
+        ax.set_xlabel("cluster size")
+        ax.set_ylabel(ylabel)
+        ax.set_title(
+            f"libapollo-rs on AWS c6g.large ({manifest['env'].get('region', '?')})\n"
+            f"block_size={manifest['block_size']}, window={manifest['window']}, "
+            f"runs={manifest['runs_per_cell']} per cell, error bars = min/max"
+        )
+        if logy:
+            ax.set_yscale("log")
+        ax.legend(frameon=False)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out_path / fname)
+        plt.close(fig)
+
+    _grouped_bar("tx_s", "throughput (tx/s)",   "throughput.png", logy=False)
+    _grouped_bar("ms",   "latency (ms)",        "latency.png",    logy=False)
+
+    # Copy the manifest so the benchmarks/ folder is self-documenting.
+    import shutil
+    shutil.copy(results_dir / "manifest.json", out_path / "manifest.json")
+
+    print(f"[plot] wrote {out_path}/{{throughput,latency}}.png + summary.csv + manifest.json")
 
 
 @task
 def stop(ctx: Context):
-    """Kill any running node / client binary on every host."""
+    """Kill any running node / client tmux session on every host."""
     state = _load_state()
     conns = _connections(state)
-    _run_parallel(conns, "pkill -f libapollo-rs/target/release/ || true", warn=True)
+    _run_parallel(
+        conns,
+        "tmux kill-session -t node 2>/dev/null || true; "
+        "tmux kill-session -t client 2>/dev/null || true; "
+        "pkill -f libapollo-rs/target/release/ 2>/dev/null || true",
+        warn=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -722,14 +1078,19 @@ def teardown(ctx: Context, force: bool = False):
         ec2.terminate_instances(InstanceIds=ids)
         ec2.get_waiter("instance_terminated").wait(InstanceIds=ids)
 
-    # These hang around until instances fully release their ENIs.
+    # Ordering matters: dependents before their dependencies. AWS
+    # refuses to delete:
+    #   * a route table that's still associated with a subnet,
+    #   * a subnet whose VPC still has an attached IGW with traffic,
+    #   * a VPC with any lingering subnet / RT / SG / IGW / ENI.
+    # So: SG -> subnet -> IGW (detach+delete) -> RT -> VPC.
     for key, caller in [
         ("sg_id", lambda i: ec2.delete_security_group(GroupId=i)),
-        ("rt_id", lambda i: ec2.delete_route_table(RouteTableId=i)),
+        ("subnet_id", lambda i: ec2.delete_subnet(SubnetId=i)),
         ("igw_id", lambda i: (ec2.detach_internet_gateway(InternetGatewayId=i,
                                                           VpcId=state["vpc_id"]),
                               ec2.delete_internet_gateway(InternetGatewayId=i))),
-        ("subnet_id", lambda i: ec2.delete_subnet(SubnetId=i)),
+        ("rt_id", lambda i: ec2.delete_route_table(RouteTableId=i)),
         ("vpc_id", lambda i: ec2.delete_vpc(VpcId=i)),
     ]:
         rid = state.get(key)
