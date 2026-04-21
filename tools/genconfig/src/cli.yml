@@ -79,3 +79,15 @@ args:
         help: base port p for the mempool peer-sync socket; node i binds p+i
         takes_value: true
         required: true
+    - node_ips:
+        short: I
+        long: node_ips
+        help: "comma-separated list of peer IP addresses to include in each node's TLS cert SAN. Use when nodes aren't on localhost (e.g. multi-VM benchmark). The SAN always also includes 127.0.0.1, localhost, nodes.com."
+        takes_value: true
+        required: false
+    - client_ips:
+        short: K
+        long: client_ips
+        help: "comma-separated list of client IP addresses to include in the client's TLS cert SAN. Same rule as --node_ips for the stress-test client."
+        takes_value: true
+        required: false

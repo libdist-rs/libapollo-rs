@@ -89,6 +89,7 @@ fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, ErrorStack> {
 fn get_signed_cert(
     ca_cert: &X509Ref,
     ca_privkey: &PKeyRef<Private>,
+    extra_ip_sans: &[String],
 ) -> Result<(X509, PKey<Private>), ErrorStack> {
     let rsa = Rsa::generate(2048)?;
     let privkey = PKey::from_rsa(rsa)?;
@@ -132,14 +133,22 @@ fn get_signed_cert(
         .build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
     cert_builder.append_extension(auth_key_identifier)?;
 
-    // SANs cover the SNI values libnet-rs derives at connect time: loopback
-    // addresses resolve to "localhost", non-loopback IPs pass through as IP
-    // SANs. Keep "nodes.com" so legacy-client code paths still verify.
-    let subject_alt_name = SubjectAlternativeName::new()
-        .dns("localhost")
-        .dns("nodes.com")
-        .ip("127.0.0.1")
-        .build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
+    // SANs cover the SNI values libnet-rs derives at connect time:
+    // loopback addresses resolve to "localhost"; non-loopback IPs
+    // pass through as IP SANs. Always include 127.0.0.1 + localhost
+    // + nodes.com for the local / fallback case, and append any
+    // `extra_ip_sans` the caller knows about (populated via
+    // `--node_ips` / `--client_ips` for multi-VM runs so the peer's
+    // real address matches the cert).
+    let mut san_builder = SubjectAlternativeName::new();
+    san_builder.dns("localhost");
+    san_builder.dns("nodes.com");
+    san_builder.ip("127.0.0.1");
+    for ip in extra_ip_sans {
+        san_builder.ip(ip);
+    }
+    let subject_alt_name =
+        san_builder.build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
     cert_builder.append_extension(subject_alt_name)?;
 
     cert_builder.sign(&ca_privkey, MessageDigest::sha256())?;
@@ -196,6 +205,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         .expect("mempool_base_port value not specified")
         .parse::<u16>()
         .expect("failed to parse mempool_base_port into an integer");
+
+    // Parse `--node_ips` / `--client_ips` comma-separated lists into
+    // IP SANs for the per-node / per-client certs. Empty list leaves
+    // certs localhost-only (pre-existing behaviour).
+    fn parse_ip_list(spec: Option<&str>) -> Vec<String> {
+        spec.map(|s| s.split(',')
+                     .map(|x| x.trim().to_string())
+                     .filter(|x| !x.is_empty())
+                     .collect())
+            .unwrap_or_default()
+    }
+    let node_ip_sans: Vec<String> = parse_ip_list(m.value_of("node_ips"));
+    let client_ip_sans: Vec<String> = parse_ip_list(m.value_of("client_ips"));
+
     let mut client = Client::new();
     client.block_size = blocksize;
     client.crypto_alg = t.clone();
@@ -257,7 +280,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         format!("127.0.0.1:{}", client_base_port+(i as u16))
         );
 
-        let (new_cert, new_pkey) = get_signed_cert(&cert, &privkey)?;
+        let (new_cert, new_pkey) = get_signed_cert(&cert, &privkey, &node_ip_sans)?;
 
         // Write a chain PEM containing `[leaf, root CA]` in that order.
         // libnet-rs uses this file for both the server identity and the
@@ -280,7 +303,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // can push committed `ClientMsg` back.
     let client_id: u16 = 0;
     let client_addr = format!("127.0.0.1:{}", client_listen_port);
-    let (client_cert, client_pkey) = get_signed_cert(&cert, &privkey)?;
+    let (client_cert, client_pkey) = get_signed_cert(&cert, &privkey, &client_ip_sans)?;
     let mut client_chain_pem = client_cert.to_pem()?;
     client_chain_pem.extend_from_slice(&root_cert_pem);
     let client_key_pem = client_pkey.private_key_to_pem_pkcs8()?;
