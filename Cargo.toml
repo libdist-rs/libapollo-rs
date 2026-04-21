@@ -4,6 +4,7 @@ members = [
     "types",
     "config",
     "util",
+    "mempool",
     "consensus",
     "consensus/apollo",
     "consensus/artemis",
