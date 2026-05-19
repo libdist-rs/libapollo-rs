@@ -4,6 +4,21 @@ use std::{error::Error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Raise the per-process FD soft limit before opening any sockets.
+    // Scalability sweep at n=61 needs >7k FDs per process; macOS default
+    // soft limit is 256.
+    match fdlimit::raise_fd_limit() {
+        Ok(fdlimit::Outcome::LimitRaised { from, to }) => {
+            println!("Raised FD limit: {} -> {}", from, to);
+        }
+        Ok(fdlimit::Outcome::Unsupported) => {
+            println!("FD limit raise: unsupported on this platform");
+        }
+        Err(e) => {
+            eprintln!("FD limit raise failed: {e}; continuing with current limit");
+        }
+    }
+
     let yaml = load_yaml!("cli.yml");
     let m = App::from_yaml(yaml).get_matches();
 
