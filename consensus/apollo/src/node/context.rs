@@ -88,6 +88,19 @@ pub struct Context {
     /// to clients (carried through from config).
     pub payload: usize,
 
+    /// Block size, carried through from config; used by the throughput
+    /// sampler to convert "committed blocks" into "committed txs".
+    pub block_size: usize,
+
+    /// Bench-only throughput sampler state. The reactor reads/writes
+    /// these directly under a `tokio::time::interval` arm:
+    /// - `bench_committed_tx_count` is incremented at every commit;
+    /// - `bench_emit_window_secs` controls the tick rate;
+    /// - `bench_metrics_node` is the single replica id that prints.
+    pub bench_committed_tx_count: u64,
+    pub bench_emit_window_secs: u64,
+    pub bench_metrics_node: Replica,
+
     // Protocol state
     pub last_seen_block: Arc<Block>,
     /// The blocks we are waiting for, to handle propose messages
@@ -154,6 +167,10 @@ impl Context {
             prop_buf: VecDeque::new(),
             other_buf: VecDeque::new(),
             payload: config.payload,
+            block_size: config.block_size,
+            bench_committed_tx_count: 0,
+            bench_emit_window_secs: config.bench_emit_window_secs.max(1),
+            bench_metrics_node: config.bench_metrics_node,
         };
         for (id, pk_data) in &config.pk_map {
             if *id == c.myid {

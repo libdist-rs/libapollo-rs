@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use config::Client;
-use consensus::statistics;
+use consensus::statistics_latency;
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use net_common::{CertSource, TlsOptions};
@@ -147,7 +147,7 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
         }
         if cx.num_cmds > m as u128 {
             let now = SystemTime::now();
-            statistics(now, start, cx.latency_map);
+            statistics_latency(now, start, cx.latency_map);
             return;
         }
     }

@@ -40,8 +40,31 @@ pub async fn reactor(
 
     let myid = config.id;
 
+    // Bench-only: throughput sampler. We always tick the interval (the
+    // overhead is negligible) but only the configured metrics node
+    // actually emits, so a multi-node run produces a single
+    // `DP[Throughput]` stream that the orchestrator can latch onto.
+    let window_secs = cx.bench_emit_window_secs;
+    let metrics_node = cx.bench_metrics_node;
+    let mut throughput_tick = tokio::time::interval(
+        std::time::Duration::from_secs(window_secs),
+    );
+    // Skip the immediate first tick so we don't print a zero before
+    // the protocol has had a chance to commit anything.
+    throughput_tick.set_missed_tick_behavior(
+        tokio::time::MissedTickBehavior::Delay,
+    );
+    let _ = throughput_tick.tick().await; // consume the first (instant) tick
+
     loop {
         tokio::select! {
+            _ = throughput_tick.tick() => {
+                if myid == metrics_node {
+                    let tx = cx.bench_committed_tx_count;
+                    cx.bench_committed_tx_count = 0;
+                    eprintln!("DP[Throughput]: {}", (tx as f64) / window_secs as f64);
+                }
+            },
             pmsg_opt = consensus_recv.next() => {
                 let pmsg = match pmsg_opt {
                     None => {

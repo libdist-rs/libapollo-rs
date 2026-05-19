@@ -19,6 +19,13 @@ use toml::from_str;
 /// them by using a dedicated id type.
 pub type ClientId = u16;
 
+/// Default emit window (seconds) for the server-side throughput sampler.
+/// Matches the leto-rs convention so a multi-protocol orchestrator can
+/// reuse the same knob across libs.
+fn default_bench_emit_window_secs() -> u64 {
+    5
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Node {
     /// Peer addresses for node-to-node (consensus) TLS.
@@ -51,6 +58,17 @@ pub struct Node {
     /// client endpoint is never hit by peer batch requests.
     pub mempool_port: u16,
     pub payload: usize,
+
+    /// Bench-only: window (in seconds) over which the server-side
+    /// throughput sampler aggregates committed transactions before
+    /// emitting a `DP[Throughput]` line. Only the node whose id equals
+    /// `bench_metrics_node` actually emits, so the orchestrator sees a
+    /// single stream per run. Both default to a sensible value when the
+    /// field is missing from older config files (5s, node 0).
+    #[serde(default = "default_bench_emit_window_secs")]
+    pub bench_emit_window_secs: u64,
+    #[serde(default)]
+    pub bench_metrics_node: Replica,
 
     /// Crypto primitives
     pub crypto_alg: Algorithm,
@@ -123,6 +141,8 @@ impl Node {
             my_cert_path: String::new(),
             root_cert_path: String::new(),
             my_cert_key_path: String::new(),
+            bench_emit_window_secs: default_bench_emit_window_secs(),
+            bench_metrics_node: 0,
         }
     }
 

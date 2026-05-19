@@ -85,6 +85,16 @@ pub struct Context {
     /// to clients.
     pub payload: usize,
 
+    /// Block size, carried through from config; used by the throughput
+    /// sampler to convert "committed blocks" into "committed txs".
+    pub block_size: usize,
+
+    /// Bench-only throughput sampler state (see apollo Context for the
+    /// convention; same semantics here).
+    pub bench_committed_tx_count: u64,
+    pub bench_emit_window_secs: u64,
+    pub bench_metrics_node: Replica,
+
     // Stuff related to message reordering
     pub vote_waiting: HashMap<Hash<Block>, UCRVote>,
     pub vote_ready: HashMap<Round, UCRVote>,
@@ -156,6 +166,10 @@ impl Context {
             is_client_apollo_enabled: apollo_enabled,
             req_ctr: 0,
             payload: config.payload * config.block_size,
+            block_size: config.block_size,
+            bench_committed_tx_count: 0,
+            bench_emit_window_secs: config.bench_emit_window_secs.max(1),
+            bench_metrics_node: config.bench_metrics_node,
             vote_waiting: HashMap::default(),
             vote_ready: HashMap::default(),
             vote_chain: HashMap::default(),
