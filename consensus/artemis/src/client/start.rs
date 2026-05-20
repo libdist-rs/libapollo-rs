@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
 use tokio::sync::mpsc::{channel, Receiver};
@@ -43,7 +43,17 @@ async fn setup_tx_factory(payload: usize) -> TxFactory {
 /// matches `ClientMsg` without extra copies after deserialize.
 pub type DeliveredBlock = (Arc<Block>, Arc<[Hash<Transaction>]>, Payload);
 
-pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
+/// - `rate == 0`: closed-loop with `window`-based flow control (original).
+/// - `rate > 0`:  open-loop burst pacing — every `burst_interval_ms` send
+///   `rate * burst_interval_ms / 1000` transactions regardless of commit
+///   speed.  `window` ignored.
+pub async fn start(
+    c: Arc<Client>,
+    metric: u64,
+    window: usize,
+    rate: u64,
+    burst_interval_ms: u64,
+) {
     // Outgoing tx submission: plaintext TCP into each node's mempool.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
@@ -72,48 +82,98 @@ pub async fn start(c: Arc<Client>, metric: u64, window: usize) {
 
     let payload = c.payload;
     let mut cx = Context::new(c.clone());
-    let mut recv = setup_tx_factory(payload).await;
     let m = metric;
     cx.pending = window;
     cx.num_cmds = 0;
 
     let start = SystemTime::now();
-    loop {
-        tokio::select! {
-            tx_opt = recv.recv(), if cx.pending > 0 => {
-                if let Some(x) = tx_opt {
-                    let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
-                    let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let _ = tx_net.broadcast(&all_servers, bytes).await;
-                    cx.time_map.insert(hash, SystemTime::now());
-                    cx.pending -= 1;
-                } else {
-                    log::info!("TxFactory closed");
-                    std::process::exit(0);
-                }
-            },
-            block_opt = block_recv.next() => {
-                let now = SystemTime::now();
-                let msg = match block_opt {
-                    Some(Ok(m)) => m,
-                    Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
-                    None => panic!("server push listener closed"),
-                };
-                match msg {
-                    ClientMsg::NewBlock(v, block_vec) => try_new_round(v, block_vec, &mut cx, now).await,
-                    _ => continue,
-                };
-                while let Some(Ok(ClientMsg::NewBlock(v, block_vec))) =
-                    futures::FutureExt::now_or_never(block_recv.next()).flatten()
-                {
-                    try_new_round(v, block_vec, &mut cx, now).await;
+
+    if rate == 0 {
+        // ── Closed-loop (original) ───────────────────────────────────
+        let mut recv = setup_tx_factory(payload).await;
+        loop {
+            tokio::select! {
+                tx_opt = recv.recv(), if cx.pending > 0 => {
+                    if let Some(x) = tx_opt {
+                        let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
+                        let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
+                        let _ = tx_net.broadcast(&all_servers, bytes).await;
+                        cx.time_map.insert(hash, SystemTime::now());
+                        cx.pending -= 1;
+                    } else {
+                        log::info!("TxFactory closed");
+                        std::process::exit(0);
+                    }
+                },
+                block_opt = block_recv.next() => {
+                    let now = SystemTime::now();
+                    let msg = match block_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
+                        None => panic!("server push listener closed"),
+                    };
+                    match msg {
+                        ClientMsg::NewBlock(v, block_vec) => try_new_round(v, block_vec, &mut cx, now).await,
+                        _ => continue,
+                    };
+                    while let Some(Ok(ClientMsg::NewBlock(v, block_vec))) =
+                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
+                    {
+                        try_new_round(v, block_vec, &mut cx, now).await;
+                    }
                 }
             }
+            if cx.num_cmds > m as u128 {
+                let now = SystemTime::now();
+                statistics_latency(now, start, cx.latency_map);
+                return;
+            }
         }
-        if cx.num_cmds > m as u128 {
-            let now = SystemTime::now();
-            statistics_latency(now, start, cx.latency_map);
-            return;
+    } else {
+        // ── Open-loop burst-paced ────────────────────────────────────
+        let burst_size = ((rate * burst_interval_ms) / 1000).max(1) as usize;
+        log::info!(
+            "Open-loop pacing: rate={} tx/s, burst_interval={} ms, burst_size={}",
+            rate, burst_interval_ms, burst_size
+        );
+        let mut burst_timer = tokio::time::interval(Duration::from_millis(burst_interval_ms));
+        let mut tx_counter: u64 = 0;
+
+        loop {
+            tokio::select! {
+                _ = burst_timer.tick() => {
+                    for _ in 0..burst_size {
+                        let tx = Transaction::new_dummy_tx(tx_counter, payload);
+                        tx_counter += 1;
+                        let hash = Hash::<Transaction>::ser_and_hash(&tx);
+                        let bytes = Bytes::from(bincode::serialize(&tx).expect("tx serialize"));
+                        let _ = tx_net.broadcast(&all_servers, bytes).await;
+                        cx.time_map.insert(hash, SystemTime::now());
+                    }
+                },
+                block_opt = block_recv.next() => {
+                    let now = SystemTime::now();
+                    let msg = match block_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
+                        None => panic!("server push listener closed"),
+                    };
+                    match msg {
+                        ClientMsg::NewBlock(v, block_vec) => try_new_round(v, block_vec, &mut cx, now).await,
+                        _ => continue,
+                    };
+                    while let Some(Ok(ClientMsg::NewBlock(v, block_vec))) =
+                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
+                    {
+                        try_new_round(v, block_vec, &mut cx, now).await;
+                    }
+                }
+            }
+            if cx.num_cmds > m as u128 {
+                let now = SystemTime::now();
+                statistics_latency(now, start, cx.latency_map);
+                return;
+            }
         }
     }
 }

@@ -59,8 +59,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .parse().unwrap();
     let window:usize = m.value_of("window").unwrap_or("1000")
         .parse().unwrap();
-    
+    let rate: u64 = m.value_of("rate").unwrap_or("0")
+        .parse().unwrap();
+    let burst_interval_ms: u64 = m.value_of("burst_interval_ms").unwrap_or("100")
+        .parse().unwrap();
+
     apollo::client::start(
-        &config, metrics, window).await;
+        &config, metrics, window, rate, burst_interval_ms).await;
     Ok(())
 }

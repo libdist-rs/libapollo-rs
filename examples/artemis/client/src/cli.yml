@@ -19,6 +19,15 @@ args:
     - window:
         short: w
         takes_value: true
+    - rate:
+        short: r
+        long: rate
+        help: Offered tx/s (open-loop burst pacing). 0 = closed-loop default.
+        takes_value: true
+    - burst_interval_ms:
+        long: burst-interval-ms
+        help: Open-loop burst interval in ms (default 100).
+        takes_value: true
     - ip:
         short: i
         long: ip

@@ -7,7 +7,7 @@ use net_common::{CertSource, TlsOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tcp_sender::TcpSimpleSender;
 use tls_receiver::TlsReceiver;
 use tokio::sync::mpsc::channel;
@@ -15,7 +15,23 @@ use tokio_stream::StreamExt;
 use types::apollo::{ClientMsg, Propose, Replica, Transaction};
 use super::Context;
 
-pub async fn start(c: &Client, metric: u64, window: usize) {
+/// Run the apollo client.
+///
+/// - `rate == 0`: original closed-loop with `window`-based flow control
+///   (producer task fills a bounded channel; main reactor sends one tx
+///   per slot freed by a commit).  `window` is the credit count.
+/// - `rate > 0`:  open-loop burst pacing.  Every `burst_interval_ms`
+///   the reactor sends `rate * burst_interval_ms / 1000` transactions
+///   regardless of commit speed.  `window` is ignored.  Matches the
+///   pattern used by leto/zeus's stresser so Pareto sweeps see honest
+///   offered-rate response curves.
+pub async fn start(
+    c: &Client,
+    metric: u64,
+    window: usize,
+    rate: u64,
+    burst_interval_ms: u64,
+) {
     // Outgoing tx submission: plaintext TCP into each node's mempool
     // client listener.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
@@ -45,38 +61,26 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
     let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
 
     let payload = c.payload;
-    let (send, mut recv) = channel(util::CHANNEL_SIZE);
-    let m = metric;
-    tokio::spawn(async move {
-        let mut i = 0u64;
-        loop {
-            let tx = Transaction::new_dummy_tx(i, payload);
-            i += 1;
-            if let Err(e) = send.send(Arc::new(tx)).await {
-                log::info!("Closing tx producer channel: {}", e);
-                std::process::exit(0);
-            }
-        }
-    });
 
     let mut cx = Context::new();
     cx.pending = window;
     cx.num_cmds = 0;
 
-    // Burst-send the first `f * block_size` transactions so the chain
-    // can warm up before the window-based flow control kicks in.
+    // Warmup (shared between both paths): burst-send `f * block_size`
+    // transactions so the chain can warm up, then absorb the first `f`
+    // blocks so `cx.round` is synced before latency tracking starts.
+    let mut tx_counter: u64 = 0;
     let first_send = c.num_faults * c.block_size;
-    log::debug!("Sending {} transactions initially", first_send);
+    log::debug!("Warmup: sending {} transactions", first_send);
     for _ in 0..first_send {
-        let next = recv.recv().await.unwrap();
-        let bytes = Bytes::from(bincode::serialize(next.as_ref()).expect("tx serialize"));
+        let tx = Transaction::new_dummy_tx(tx_counter, payload);
+        tx_counter += 1;
+        let bytes = Bytes::from(bincode::serialize(&tx).expect("tx serialize"));
         let _ = tx_net.broadcast(&all_servers, bytes).await;
     }
 
-    // Absorb the first `f` blocks so the client's `Context` is round-synced
-    // before we start latency-tracking.
     let first_recv = c.num_faults as u64;
-    log::debug!("Receiving first {} blocks", first_recv);
+    log::debug!("Warmup: receiving first {} blocks", first_recv);
     for _ in 0..first_recv {
         let msg = match block_recv.next().await {
             Some(Ok(m)) => m,
@@ -99,56 +103,136 @@ pub async fn start(c: &Client, metric: u64, window: usize) {
             cx.round += 1;
         }
     }
-    log::info!("Finally at round {}", cx.round);
-    log::debug!("Finished sending first few blocks");
+    log::info!("Warmup complete at round {}", cx.round);
 
+    let m = metric;
     let start = SystemTime::now();
-    loop {
-        tokio::select! {
-            tx_opt = recv.recv(), if cx.pending > 0 => {
-                if let Some(x) = tx_opt {
-                    let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
-                    let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                    let _ = tx_net.broadcast(&all_servers, bytes).await;
-                    cx.time_map.insert(hash, SystemTime::now());
-                    cx.pending -= 1;
-                } else {
-                    println!("Finished sending messages");
+
+    if rate == 0 {
+        // ── Closed-loop path (original behaviour) ────────────────────
+        // Producer task: generates a continuous stream of dummy txs
+        // into a bounded channel.  Drained by the main reactor only
+        // when `cx.pending > 0` (commits free up credit).
+        let (send, mut recv) = channel(util::CHANNEL_SIZE);
+        let payload_for_producer = payload;
+        let mut producer_counter = tx_counter;
+        tokio::spawn(async move {
+            loop {
+                let tx = Transaction::new_dummy_tx(producer_counter, payload_for_producer);
+                producer_counter += 1;
+                if let Err(e) = send.send(Arc::new(tx)).await {
+                    log::info!("Closing tx producer channel: {}", e);
                     std::process::exit(0);
                 }
-            },
-            block_opt = block_recv.next() => {
-                let now = SystemTime::now();
-                let msg = match block_opt {
-                    Some(Ok(m)) => m,
-                    Some(Err(e)) => {
-                        log::warn!("bad ClientMsg bytes: {}", e);
-                        continue;
+            }
+        });
+
+        loop {
+            tokio::select! {
+                tx_opt = recv.recv(), if cx.pending > 0 => {
+                    if let Some(x) = tx_opt {
+                        let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
+                        let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
+                        let _ = tx_net.broadcast(&all_servers, bytes).await;
+                        cx.time_map.insert(hash, SystemTime::now());
+                        cx.pending -= 1;
+                    } else {
+                        println!("Finished sending messages");
+                        std::process::exit(0);
                     }
-                    None => panic!("server push listener closed"),
-                };
-                let (prop, block, tx_hashes) = match msg {
-                    ClientMsg::NewBlock(p, b, tx_hashes, _pl) => (p, b, tx_hashes),
-                    _ => continue,
-                };
-                let prop_round = prop.round;
-                update_props(prop, block, &mut cx);
-                cx.tx_hash_map.insert(prop_round, tx_hashes);
-                // Drain any other ready blocks in one pass.
-                while let Some(Ok(ClientMsg::NewBlock(p, b, tx_hashes, _))) =
-                    futures::FutureExt::now_or_never(block_recv.next()).flatten()
-                {
-                    let r = p.round;
-                    update_props(p, b, &mut cx);
-                    cx.tx_hash_map.insert(r, tx_hashes);
+                },
+                block_opt = block_recv.next() => {
+                    let now = SystemTime::now();
+                    let msg = match block_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            log::warn!("bad ClientMsg bytes: {}", e);
+                            continue;
+                        }
+                        None => panic!("server push listener closed"),
+                    };
+                    let (prop, block, tx_hashes) = match msg {
+                        ClientMsg::NewBlock(p, b, tx_hashes, _pl) => (p, b, tx_hashes),
+                        _ => continue,
+                    };
+                    let prop_round = prop.round;
+                    update_props(prop, block, &mut cx);
+                    cx.tx_hash_map.insert(prop_round, tx_hashes);
+                    // Drain any other ready blocks in one pass.
+                    while let Some(Ok(ClientMsg::NewBlock(p, b, tx_hashes, _))) =
+                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
+                    {
+                        let r = p.round;
+                        update_props(p, b, &mut cx);
+                        cx.tx_hash_map.insert(r, tx_hashes);
+                    }
+                    handle_new_blocks(c, &mut cx, now);
                 }
-                handle_new_blocks(c, &mut cx, now);
+            }
+            if cx.num_cmds > m as u128 {
+                let now = SystemTime::now();
+                statistics_latency(now, start, cx.latency_map);
+                return;
             }
         }
-        if cx.num_cmds > m as u128 {
-            let now = SystemTime::now();
-            statistics_latency(now, start, cx.latency_map);
-            return;
+    } else {
+        // ── Open-loop burst-paced path ───────────────────────────────
+        // Every `burst_interval_ms`, send `burst_size` transactions.
+        // Latency is tracked the same way (commits look up send time
+        // in `cx.time_map`).  No `cx.pending` gating — if the chain
+        // can't keep up, send-side queues at the kernel will fill and
+        // `tx_net.broadcast` will naturally back-pressure.
+        let burst_size = ((rate * burst_interval_ms) / 1000).max(1) as usize;
+        log::info!(
+            "Open-loop pacing: rate={} tx/s, burst_interval={} ms, burst_size={}",
+            rate, burst_interval_ms, burst_size
+        );
+        let mut burst_timer = tokio::time::interval(Duration::from_millis(burst_interval_ms));
+
+        loop {
+            tokio::select! {
+                _ = burst_timer.tick() => {
+                    for _ in 0..burst_size {
+                        let tx = Transaction::new_dummy_tx(tx_counter, payload);
+                        tx_counter += 1;
+                        let hash = Hash::<Transaction>::ser_and_hash(&tx);
+                        let bytes = Bytes::from(bincode::serialize(&tx).expect("tx serialize"));
+                        let _ = tx_net.broadcast(&all_servers, bytes).await;
+                        cx.time_map.insert(hash, SystemTime::now());
+                    }
+                },
+                block_opt = block_recv.next() => {
+                    let now = SystemTime::now();
+                    let msg = match block_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            log::warn!("bad ClientMsg bytes: {}", e);
+                            continue;
+                        }
+                        None => panic!("server push listener closed"),
+                    };
+                    let (prop, block, tx_hashes) = match msg {
+                        ClientMsg::NewBlock(p, b, tx_hashes, _pl) => (p, b, tx_hashes),
+                        _ => continue,
+                    };
+                    let prop_round = prop.round;
+                    update_props(prop, block, &mut cx);
+                    cx.tx_hash_map.insert(prop_round, tx_hashes);
+                    while let Some(Ok(ClientMsg::NewBlock(p, b, tx_hashes, _))) =
+                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
+                    {
+                        let r = p.round;
+                        update_props(p, b, &mut cx);
+                        cx.tx_hash_map.insert(r, tx_hashes);
+                    }
+                    handle_new_blocks(c, &mut cx, now);
+                }
+            }
+            if cx.num_cmds > m as u128 {
+                let now = SystemTime::now();
+                statistics_latency(now, start, cx.latency_map);
+                return;
+            }
         }
     }
 }
