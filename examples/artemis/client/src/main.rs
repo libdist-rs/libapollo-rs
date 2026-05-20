@@ -55,17 +55,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     log::info!("Successfully decoded the config file");
-    let metrics:u64 = m.value_of("metrics").unwrap_or("500000")
+    let metrics: u64 = m.value_of("metrics").unwrap_or("500000")
         .parse().unwrap();
-    let window:usize = m.value_of("window").unwrap_or("1000")
-        .parse().unwrap();
-    let rate: u64 = m.value_of("rate").unwrap_or("0")
+    let txs_per_burst: usize = m.value_of("txs_per_burst")
+        .or_else(|| m.value_of("window"))
+        .unwrap_or("1000")
         .parse().unwrap();
     let burst_interval_ms: u64 = m.value_of("burst_interval_ms").unwrap_or("100")
         .parse().unwrap();
 
     let config = Arc::new(config);
     artemis::client::start(
-        config, metrics, window, rate, burst_interval_ms).await;
+        config, metrics, txs_per_burst, burst_interval_ms).await;
     Ok(())
 }

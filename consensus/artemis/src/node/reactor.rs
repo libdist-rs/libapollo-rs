@@ -1,49 +1,41 @@
-/// The core consensus module used for Artemis
-///
-/// The reactor reacts to all the messages from the network, and talks to the
-/// clients accordingly.
+/// The core consensus module used for Artemis.
 use super::{buffer_message, context::Context, do_new_block, process_message};
 use crate::node::round_vote::try_round_vote;
-use config::{ClientId, Node};
+use config::Node;
 use futures::future::FutureExt;
-use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, BatcherConsensusMsg, CachedBatch};
 use libstorage::rocksdb::Storage as RocksStore;
 use std::sync::Arc;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::StreamExt;
-use types::artemis::{ClientMsg, ProtocolMsg, Replica, Round, Transaction};
+use types::artemis::{ProtocolMsg, Replica, Transaction};
 
 pub async fn reactor(
     config: &Node,
-    is_client_apollo_enabled: bool,
     consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
-    client_net: TlsReliableSender<ClientId, ClientMsg>,
     batch_store: RocksStore,
     batch_cache: Arc<BatchCache<Transaction>>,
     mut rx_mem_to_consensus: UnboundedReceiver<(
         BatchHash<Transaction>,
         Arc<CachedBatch<Transaction>>,
     )>,
-    tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
+    tx_consensus_to_batcher: UnboundedSender<BatcherConsensusMsg<Transaction>>,
+    tx_committed_to_router: UnboundedSender<Arc<CachedBatch<Transaction>>>,
 ) {
     let mut cx = Context::new(
         config,
         consensus_net,
-        client_net,
         batch_store,
         batch_cache,
-        tx_consensus_to_mem,
-        is_client_apollo_enabled,
+        tx_consensus_to_batcher,
+        tx_committed_to_router,
     );
     let myid = config.id;
     let metrics = cx.metrics.clone();
     let sigint_myid = myid;
-    // Install signal handlers once; on SIGINT or SIGTERM dump metrics
-    // to stderr and bail. `process::exit` forces the flush even when
-    // the reactor is blocked in `multicast`.
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -63,19 +55,16 @@ pub async fn reactor(
         std::process::exit(0);
     });
 
-    // Bench-only: throughput sampler. We always tick the interval (the
-    // overhead is negligible) but only the configured metrics node
-    // actually emits, so a multi-node run produces a single
-    // `DP[Throughput]` stream that the orchestrator can latch onto.
+    // Seed the batcher: view leader is 0 and the first block will be
+    // at height 1.
+    cx.announce_height_to_batcher();
+
     let window_secs = cx.bench_emit_window_secs;
     let metrics_node = cx.bench_metrics_node;
-    let mut throughput_tick = tokio::time::interval(
-        std::time::Duration::from_secs(window_secs),
-    );
-    throughput_tick.set_missed_tick_behavior(
-        tokio::time::MissedTickBehavior::Delay,
-    );
-    let _ = throughput_tick.tick().await; // consume the first (instant) tick
+    let mut throughput_tick =
+        tokio::time::interval(std::time::Duration::from_secs(window_secs));
+    throughput_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _ = throughput_tick.tick().await; // consume the immediate first tick
 
     loop {
         cx.metrics.record_reactor_iter();
@@ -118,7 +107,6 @@ pub async fn reactor(
                 }
             }
         }
-        // View leader drains its pending-batch queue.
         while cx.view_leader == myid && !cx.pending_batches.is_empty() {
             let (bh, batch) = cx.pending_batches.pop_front().unwrap();
             log::debug!("I {} am the view leader and dispatching batch {:?}", cx.myid(), bh);

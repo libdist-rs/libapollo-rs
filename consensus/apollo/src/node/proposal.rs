@@ -1,12 +1,13 @@
-use libmempool::{BatchHash, CachedBatch};
+use libmempool::{BatchHash, BatcherConsensusMsg, CachedBatch};
 use std::sync::Arc;
 use types::apollo::{Block, Propose, ProtocolMsg, Replica, Transaction};
 use types::BlockTrait;
+
 use super::*;
 
 /// Leader proposes a block wrapping the given batch. The `batch` arg
-/// arrives from the mempool's Processor via the consensus channel as
-/// `Arc<CachedBatch>` -- no rocksdb read needed.
+/// arrives from the keyed mempool's sealer task via the consensus
+/// channel as `Arc<CachedBatch>` — no rocksdb read needed.
 pub async fn do_propose(
     batch_hash: BatchHash<Transaction>,
     batch: Arc<CachedBatch<Transaction>>,
@@ -25,15 +26,6 @@ pub async fn do_propose(
     p.sig.origin = cx.myid();
     p.sign(cx.my_secret_key.as_ref());
 
-    // Hydrate tx hashes BEFORE moving `batch` into the ProtocolMsg.
-    // Cheap thanks to `CachedBatch::tx_hashes` OnceLock-cache (intake
-    // pre-filled on the leader).
-    let tx_hashes = if cx.is_client_apollo_enabled() {
-        Some(Context::hydrate_tx_hashes(batch.as_ref()))
-    } else {
-        None
-    };
-
     let msg = Arc::new(ProtocolMsg::NewProposal(
         p.clone(),
         new_block.clone(),
@@ -41,20 +33,22 @@ pub async fn do_propose(
     ));
     cx.multicast(msg).await;
 
-    let block_arc = Arc::new(new_block);
-    if let Some(tx_hashes) = tx_hashes {
-        cx.multicast_client(Arc::new(p.clone()), block_arc.clone(), tx_hashes)
-            .await;
-    }
+    // Tell the batcher's Txpool that this batch is now InFlight at
+    // this round. Idempotent on the proposer's own loopback (see
+    // `trace8_proposer_loopback`).
+    let _ = cx
+        .tx_consensus_to_batcher
+        .send(BatcherConsensusMsg::Proposed {
+            batch: Arc::clone(&batch),
+            round: cx.round(),
+        });
 
+    let block_arc = Arc::new(new_block);
     cx.storage.add_delivered_block(block_arc.clone());
     on_receive_proposal(Arc::new(p), block_arc, cx).await;
 }
 
 /// Incoming proposal: block and parent must already be delivered in storage.
-/// `from` is the peer to ask for missing ancestors if we defer this to
-/// `future_msgs` (typically the proposal's leader or the Response's
-/// responder, depending on how it entered the buffer).
 pub async fn try_receive_proposal(
     p: Propose,
     block: Arc<Block>,
@@ -89,7 +83,7 @@ pub async fn try_receive_proposal(
 }
 
 /// Verify that the batch carried in a proposal / response hashes to
-/// what the block commits to. Free `OnceLock` compare -- the hash was
+/// what the block commits to. Free `OnceLock` compare — the hash was
 /// populated during the wire `Deserialize`.
 pub fn check_batch_hash(block: &Block, batch: &CachedBatch<Transaction>) -> bool {
     batch.hash() == block.body.batch_hash
@@ -99,20 +93,18 @@ pub fn check_batch_hash(block: &Block, batch: &CachedBatch<Transaction>) -> bool
 pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Context) {
     log::debug!("Handling valid proposal: {:?}", p);
 
-    // Equivocation check: another block at this height from the same author.
+    // Equivocation check.
     if let Some(x) = cx.storage.delivered_block_from_ht(block.header.height) {
         if x.hash != block.hash && x.header.author == block.header.author {
             log::warn!(
-                "Equivocation detected: {:?}, {:?}",
-                cx.storage.delivered_block_from_ht(block.header.height),
-                block,
+                "Equivocation detected at height {}",
+                block.header.height,
             );
             return;
         }
     }
 
-    // Relay to the next leader before doing any heavy local work so the
-    // chain keeps moving even if our commit path is slow.
+    // Relay to the next leader.
     let msg = Arc::new(ProtocolMsg::Relay(cx.myid(), (*p).clone()));
     cx.send(cx.next_leader(), msg).await;
 

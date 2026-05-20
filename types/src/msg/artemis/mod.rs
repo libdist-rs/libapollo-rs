@@ -9,9 +9,6 @@ pub use proto::*;
 mod ucr;
 pub use ucr::*;
 
-mod client;
-pub use client::*;
-
 pub type Height = crate::Height;
 pub type Transaction = super::Transaction;
 pub type Vote = super::Vote;

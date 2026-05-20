@@ -1,60 +1,31 @@
+//! Artemis client — keyed-mempool / per-tx-confirmation variant.
+//!
+//! Submits transactions as `ClientMsg::NewBatch { batch, reply_to }`
+//! to every server's mempool TCP port. Each tx is stamped with
+//! `(client_id, monotonically-increasing nonce)` so the server-side
+//! `Txpool` can dedupe across replicas and enforce replay protection.
+//! Latency is measured per-tx via the server's confirmation router.
+
 use bytes::Bytes;
 use config::Client;
-use consensus::statistics_latency;
+use consensus::statistics;
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
-use net_common::{CertSource, TlsOptions};
-use std::convert::TryFrom;
+use libmempool::ClientMsg;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tcp_receiver::TcpReceiver;
 use tcp_sender::TcpSimpleSender;
-use tls_receiver::TlsReceiver;
-use tokio::sync::mpsc::{channel, Receiver};
 use tokio_stream::StreamExt;
-use types::artemis::{Block, ClientMsg, Payload, Replica, Transaction, UCRVote};
-use types::BlockTrait;
-use super::Context;
+use types::artemis::{Replica, Transaction};
 
-type TxFactory = Receiver<Arc<Transaction>>;
-
-/// Setup a concurrent thread that produces a stream of dummy transactions
-/// so that the main reactor has a buffer of transactions always ready to send to the nodes
-async fn setup_tx_factory(payload: usize) -> TxFactory {
-    let (send, recv) = channel(util::CHANNEL_SIZE);
-    tokio::spawn(async move {
-        let mut i = 0u64;
-        loop {
-            let tx = Transaction::new_dummy_tx(i, payload);
-            i += 1;
-            if let Err(e) = send.send(Arc::new(tx)).await {
-                log::info!("Closing tx producer channel: {}", e);
-                std::process::exit(0);
-            }
-        }
-    });
-    recv
-}
-
-/// Artemis's `ClientMsg::NewBlock` carries a tuple per block -- the
-/// block, server-hydrated tx hashes, and a payload. The server ships
-/// `Arc<Block>` + `Arc<[Hash<Transaction>]>` so the in-memory shape
-/// matches `ClientMsg` without extra copies after deserialize.
-pub type DeliveredBlock = (Arc<Block>, Arc<[Hash<Transaction>]>, Payload);
-
-/// - `rate == 0`: closed-loop with `window`-based flow control (original).
-/// - `rate > 0`:  open-loop burst pacing — every `burst_interval_ms` send
-///   `rate * burst_interval_ms / 1000` transactions regardless of commit
-///   speed.  `window` ignored.
 pub async fn start(
     c: Arc<Client>,
     metric: u64,
-    window: usize,
-    rate: u64,
+    txs_per_burst: usize,
     burst_interval_ms: u64,
 ) {
-    // Outgoing tx submission: plaintext TCP into each node's mempool.
     let mut peer_map: HashMap<Replica, SocketAddr> = HashMap::default();
     for (&id, addr) in &c.net_map {
         peer_map.insert(
@@ -64,195 +35,73 @@ pub async fn start(
         );
     }
     let all_servers: Vec<Replica> = peer_map.keys().copied().collect();
-    let mut tx_net = TcpSimpleSender::<Replica, Transaction>::with_peers(peer_map);
+    let mut tx_net = TcpSimpleSender::<Replica, ClientMsg<Transaction>>::with_peers(peer_map);
 
-    // Incoming `ClientMsg::NewBlock` pushes: still TLS.
-    let tls = || TlsOptions {
-        cert_source: CertSource::PemFiles {
-            cert_chain: PathBuf::from(&c.my_cert_path),
-            private_key: PathBuf::from(&c.my_cert_key_path),
-        },
-        ..TlsOptions::high_throughput()
-    };
-    let listen: SocketAddr = c
+    let reply_to: SocketAddr = c
         .my_listen_addr
         .parse()
         .expect("invalid client listen addr");
-    let mut block_recv = TlsReceiver::<ClientMsg>::spawn_with_options(listen, tls());
+    let mut confirm_recv = TcpReceiver::<ClientMsg<Transaction>>::spawn(reply_to);
 
     let payload = c.payload;
-    let mut cx = Context::new(c.clone());
-    let m = metric;
-    cx.pending = window;
-    cx.num_cmds = 0;
+    let client_id = c.my_id;
+    let mut nonce: u64 = 1;
 
+    let mut time_map: HashMap<Hash<Transaction>, SystemTime> = HashMap::default();
+    let mut latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)> = HashMap::default();
+    let mut num_cmds: u128 = 0;
+
+    let burst_size = txs_per_burst.max(1);
+    log::info!(
+        "Artemis client {} starting: burst_size={} burst_interval={}ms metric={}",
+        client_id, burst_size, burst_interval_ms, metric
+    );
     let start = SystemTime::now();
+    let mut burst_timer = tokio::time::interval(Duration::from_millis(burst_interval_ms));
 
-    if rate == 0 {
-        // ── Closed-loop (original) ───────────────────────────────────
-        let mut recv = setup_tx_factory(payload).await;
-        loop {
-            tokio::select! {
-                tx_opt = recv.recv(), if cx.pending > 0 => {
-                    if let Some(x) = tx_opt {
-                        let hash = Hash::<Transaction>::ser_and_hash(x.as_ref());
-                        let bytes = Bytes::from(bincode::serialize(x.as_ref()).expect("tx serialize"));
-                        let _ = tx_net.broadcast(&all_servers, bytes).await;
-                        cx.time_map.insert(hash, SystemTime::now());
-                        cx.pending -= 1;
-                    } else {
-                        log::info!("TxFactory closed");
-                        std::process::exit(0);
-                    }
-                },
-                block_opt = block_recv.next() => {
-                    let now = SystemTime::now();
-                    let msg = match block_opt {
-                        Some(Ok(m)) => m,
-                        Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
-                        None => panic!("server push listener closed"),
-                    };
-                    match msg {
-                        ClientMsg::NewBlock(v, block_vec) => try_new_round(v, block_vec, &mut cx, now).await,
-                        _ => continue,
-                    };
-                    while let Some(Ok(ClientMsg::NewBlock(v, block_vec))) =
-                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
-                    {
-                        try_new_round(v, block_vec, &mut cx, now).await;
-                    }
-                }
-            }
-            if cx.num_cmds > m as u128 {
+    loop {
+        tokio::select! {
+            _ = burst_timer.tick() => {
+                let mut batch: Vec<Transaction> = Vec::with_capacity(burst_size);
                 let now = SystemTime::now();
-                statistics_latency(now, start, cx.latency_map);
-                return;
-            }
-        }
-    } else {
-        // ── Open-loop burst-paced ────────────────────────────────────
-        let burst_size = ((rate * burst_interval_ms) / 1000).max(1) as usize;
-        log::info!(
-            "Open-loop pacing: rate={} tx/s, burst_interval={} ms, burst_size={}",
-            rate, burst_interval_ms, burst_size
-        );
-        let mut burst_timer = tokio::time::interval(Duration::from_millis(burst_interval_ms));
-        let mut tx_counter: u64 = 0;
-
-        loop {
-            tokio::select! {
-                _ = burst_timer.tick() => {
-                    for _ in 0..burst_size {
-                        let tx = Transaction::new_dummy_tx(tx_counter, payload);
-                        tx_counter += 1;
-                        let hash = Hash::<Transaction>::ser_and_hash(&tx);
-                        let bytes = Bytes::from(bincode::serialize(&tx).expect("tx serialize"));
-                        let _ = tx_net.broadcast(&all_servers, bytes).await;
-                        cx.time_map.insert(hash, SystemTime::now());
-                    }
-                },
-                block_opt = block_recv.next() => {
-                    let now = SystemTime::now();
-                    let msg = match block_opt {
-                        Some(Ok(m)) => m,
-                        Some(Err(e)) => { log::warn!("bad ClientMsg bytes: {}", e); continue; }
-                        None => panic!("server push listener closed"),
-                    };
-                    match msg {
-                        ClientMsg::NewBlock(v, block_vec) => try_new_round(v, block_vec, &mut cx, now).await,
-                        _ => continue,
-                    };
-                    while let Some(Ok(ClientMsg::NewBlock(v, block_vec))) =
-                        futures::FutureExt::now_or_never(block_recv.next()).flatten()
-                    {
-                        try_new_round(v, block_vec, &mut cx, now).await;
-                    }
+                for _ in 0..burst_size {
+                    let tx = Transaction::new_dummy_tx_keyed(client_id, nonce, payload);
+                    nonce += 1;
+                    let h = Hash::<Transaction>::ser_and_hash(&tx);
+                    time_map.insert(h, now);
+                    batch.push(tx);
                 }
-            }
-            if cx.num_cmds > m as u128 {
+                let msg = ClientMsg::<Transaction>::NewBatch { batch, reply_to };
+                let bytes = Bytes::from(bincode::serialize(&msg).expect("ClientMsg serialize"));
+                let _ = tx_net.broadcast(&all_servers, bytes).await;
+            },
+            confirm_opt = confirm_recv.next() => {
                 let now = SystemTime::now();
-                statistics_latency(now, start, cx.latency_map);
-                return;
-            }
-        }
-    }
-}
-
-/// We got a new vote message. Check if we are in the correct round and then process it.
-async fn try_new_round(
-    v: UCRVote,
-    block_vec: Vec<DeliveredBlock>,
-    cx: &mut Context,
-    ts: SystemTime,
-) {
-    // Wire-level validation (previously in ClientMsg::init).
-    if block_vec.is_empty() {
-        log::warn!("Got a vote with 0 blocks");
-        return;
-    }
-    if block_vec.last().unwrap().0.get_hash() != v.hash {
-        log::warn!("The hash of the last block does not match the vote's hash");
-        return;
-    }
-
-    if cx.round() < v.round {
-        log::debug!("We got a vote from the future");
-        cx.future_msgs.insert(v.round, (v, block_vec));
-        return;
-    }
-    if cx.round() > v.round {
-        log::warn!("We got a vote from a round that we have already processed for");
-        return;
-    }
-    new_round(v, block_vec, cx, ts).await;
-    while let Some((v, block_vec)) = cx.future_msgs.remove(&cx.round()) {
-        new_round(v, block_vec, cx, ts).await;
-    }
-}
-
-/// Processing votes for the correct round
-async fn new_round(
-    v: UCRVote,
-    block_vec: Vec<DeliveredBlock>,
-    cx: &mut Context,
-    ts: SystemTime,
-) {
-    for (b, tx_hashes, _) in block_vec {
-        cx.pending += tx_hashes.len();
-        // `b` is already `Arc<Block>` from the wire; both storage and
-        // `tx_hash_map` get the Arc-shared value (no deep clone).
-        cx.tx_hash_map.insert(b.get_hash(), tx_hashes);
-        cx.storage.add_delivered_block(b);
-    }
-    let v = Arc::new(v);
-    cx.prop_chain.insert(v.round, v.clone());
-    if v.round <= cx.config.num_faults as u64 {
-        cx.update_round();
-        return;
-    }
-
-    let com_round = v.round - cx.config.num_faults as u64;
-    let v = cx.prop_chain.get(&com_round).expect("Must have in prop map");
-
-    let mut com_hash = v.hash.clone();
-    while !cx.storage.is_committed_by_hash(&com_hash) {
-        let b_rc = cx
-            .storage
-            .delivered_block_from_hash(&com_hash)
-            .expect("Trying to commit an undelivered block");
-        cx.storage.add_committed_block(b_rc.clone());
-        let next_hash =
-            Hash::<Block>::try_from(b_rc.blk.header.prev.as_ref()).expect("hash is exactly 32 bytes");
-        if let Some(hashes) = cx.tx_hash_map.remove(&com_hash) {
-            for tx_hash in hashes.iter() {
-                if let Some(start) = cx.time_map.remove(tx_hash) {
-                    cx.num_cmds += 1;
-                    cx.latency_map.insert(tx_hash.clone(), (start, ts));
+                let msg = match confirm_opt {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => { log::warn!("bad Confirmation bytes: {}", e); continue; }
+                    None => { log::warn!("confirmation stream closed"); continue; }
+                };
+                if let ClientMsg::Confirmation(h) = msg {
+                    if let Some(t0) = time_map.remove(&h) {
+                        latency_map.insert(h, (t0, now));
+                        num_cmds += 1;
+                    }
+                    while let Some(Ok(ClientMsg::Confirmation(h))) =
+                        futures::FutureExt::now_or_never(confirm_recv.next()).flatten()
+                    {
+                        if let Some(t0) = time_map.remove(&h) {
+                            latency_map.insert(h, (t0, now));
+                            num_cmds += 1;
+                        }
+                    }
                 }
             }
         }
-        com_hash = next_hash;
+        if num_cmds > metric as u128 {
+            let now = SystemTime::now();
+            statistics(now, start, latency_map);
+            return;
+        }
     }
-
-    cx.update_round();
 }

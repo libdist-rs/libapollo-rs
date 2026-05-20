@@ -1,14 +1,12 @@
-use libcrypto::hash::Hash;
-use types::apollo::{Block, ClientMsg, Propose, ProtocolMsg, Replica, Transaction};
+use types::apollo::{ProtocolMsg, Replica};
 
 use super::context::Context;
 use std::sync::Arc;
 
-/// Communication logic
-/// - `Send`      - send a `ProtocolMsg` to a specific node
-/// - `Multicast` - send a `ProtocolMsg` to every peer but myself
-/// - `Multicast client` - send a `ClientMsg` to every registered client
-
+/// Communication helpers: send / multicast on the consensus network.
+/// Per-tx client confirmations are routed by the mempool's
+/// `ConfirmationRouter`, so there is no `multicast_client` here any
+/// more — the node-side code only ships `ProtocolMsg`s.
 impl Context {
     /// Send a `ProtocolMsg` to a specific peer. Serializes once and
     /// stashes the returned handler under the current round.
@@ -34,31 +32,6 @@ impl Context {
             match r {
                 Ok(h) => self.remember_consensus(h),
                 Err(e) => log::warn!("consensus broadcast leg failed: {:?}", e),
-            }
-        }
-    }
-
-    /// Multicast a committed block (wrapped in a `ClientMsg`) to every
-    /// registered client. `tx_hashes` is hydrated by the caller from
-    /// the block's referenced batch so the client can match commits
-    /// back to its outstanding submissions.
-    pub(crate) async fn multicast_client(
-        &mut self,
-        p: Arc<Propose>,
-        b: Arc<Block>,
-        tx_hashes: Vec<Hash<Transaction>>,
-    ) {
-        if self.all_clients.is_empty() {
-            return;
-        }
-        let payload = types::apollo::Payload::with_payload(self.payload);
-        let msg = ClientMsg::NewBlock(p.as_ref().clone(), b.as_ref().clone(), tx_hashes, payload);
-        let bytes = bytes::Bytes::from(bincode::serialize(&msg).expect("ClientMsg serialize"));
-        let results = self.client_net.broadcast(&self.all_clients, bytes).await;
-        for r in results {
-            match r {
-                Ok(h) => self.remember_client(h),
-                Err(e) => log::warn!("client broadcast leg failed: {:?}", e),
             }
         }
     }

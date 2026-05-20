@@ -15,8 +15,10 @@ futures = "0.3"
 log = "0.4"
 dashmap = "5"
 anyhow = "1"
+fnv = "1"
 
 libcrypto = { git = "https://github.com/libdist-rs/libcrypto-rs.git" }
 libstorage = { package = "libstorage-rs", git = "https://github.com/libdist-rs/libstorage-rs.git" }
 net-common = { package = "common", git = "https://github.com/libdist-rs/libnet-rs.git" }
 tcp-receiver = { git = "https://github.com/libdist-rs/libnet-rs.git" }
+tcp-sender = { git = "https://github.com/libdist-rs/libnet-rs.git" }

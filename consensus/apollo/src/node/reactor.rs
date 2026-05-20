@@ -1,60 +1,60 @@
-/// The core consensus module used for Apollo
+/// The core consensus module used for Apollo.
 ///
-/// The reactor reacts to all the messages from the network, and talks to the
-/// clients accordingly.
+/// The reactor reacts to all the messages from the network, drains
+/// freshly-sealed batches from the keyed mempool, and triggers
+/// proposals when this node is the round leader.
 use super::{context::Context, message::*, proposal::*};
-use config::{ClientId, Node};
+use config::Node;
 use futures::future::FutureExt;
-use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, BatcherConsensusMsg, CachedBatch};
 use libstorage::rocksdb::Storage as RocksStore;
 use std::sync::Arc;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::StreamExt;
-use types::apollo::{ClientMsg, ProtocolMsg, Replica, Round, Transaction};
+use types::apollo::{ProtocolMsg, Replica, Transaction};
 
 pub async fn reactor(
     config: &Node,
-    is_client_apollo_enabled: bool,
     consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
     mut consensus_recv: TlsReceiver<ProtocolMsg>,
-    client_net: TlsReliableSender<ClientId, ClientMsg>,
     batch_store: RocksStore,
     batch_cache: Arc<BatchCache<Transaction>>,
     mut rx_mem_to_consensus: UnboundedReceiver<(
         BatchHash<Transaction>,
         Arc<CachedBatch<Transaction>>,
     )>,
-    tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
+    tx_consensus_to_batcher: UnboundedSender<BatcherConsensusMsg<Transaction>>,
+    tx_committed_to_router: UnboundedSender<Arc<CachedBatch<Transaction>>>,
 ) {
     let mut cx = Context::new(
         config,
         consensus_net,
-        client_net,
         batch_store,
         batch_cache,
-        tx_consensus_to_mem,
-        is_client_apollo_enabled,
+        tx_consensus_to_batcher,
+        tx_committed_to_router,
     );
 
     let myid = config.id;
 
-    // Bench-only: throughput sampler. We always tick the interval (the
-    // overhead is negligible) but only the configured metrics node
-    // actually emits, so a multi-node run produces a single
-    // `DP[Throughput]` stream that the orchestrator can latch onto.
+    // Seed the batcher with the initial leader / round-0 state so it
+    // knows it can start proposing immediately on the first batch.
+    let _ = cx
+        .tx_consensus_to_batcher
+        .send(BatcherConsensusMsg::NewRound {
+            leader: cx.round_leader(),
+            round: cx.round(),
+        });
+
+    // Bench-only throughput sampler.
     let window_secs = cx.bench_emit_window_secs;
     let metrics_node = cx.bench_metrics_node;
-    let mut throughput_tick = tokio::time::interval(
-        std::time::Duration::from_secs(window_secs),
-    );
-    // Skip the immediate first tick so we don't print a zero before
-    // the protocol has had a chance to commit anything.
-    throughput_tick.set_missed_tick_behavior(
-        tokio::time::MissedTickBehavior::Delay,
-    );
-    let _ = throughput_tick.tick().await; // consume the first (instant) tick
+    let mut throughput_tick =
+        tokio::time::interval(std::time::Duration::from_secs(window_secs));
+    throughput_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _ = throughput_tick.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -78,8 +78,6 @@ pub async fn reactor(
                     Some(Ok(x)) => x,
                 };
                 handle_message(pmsg, &mut cx);
-                // Drain any other ready messages in one pass so the
-                // delivery/relay buffers process together.
                 while let Some(Ok(pmsg)) = consensus_recv.next().now_or_never().flatten() {
                     handle_message(pmsg, &mut cx);
                 }
@@ -101,7 +99,6 @@ pub async fn reactor(
         // Leader drains its pending-batch queue.
         while cx.round_leader() == myid && !cx.pending_batches.is_empty() {
             let (bh, batch) = cx.pending_batches.pop_front().unwrap();
-            log::debug!("I {} am the leader and proposing batch {:?}", cx.myid(), bh);
             do_propose(bh, batch, &mut cx).await;
         }
     }

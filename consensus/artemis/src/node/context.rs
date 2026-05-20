@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use config::{ClientId, Node};
+use config::Node;
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use libcrypto::{ed25519, secp256k1, Keypair, PublicKey};
-use libmempool::{BatchCache, BatchHash, CachedBatch, ConsensusMempoolMsg};
+use libmempool::{BatchCache, BatchHash, BatcherConsensusMsg, CachedBatch};
 use libstorage::rocksdb::Storage as RocksStore;
 use linked_hash_map::LinkedHashMap;
 use std::collections::VecDeque;
@@ -13,8 +13,7 @@ use tls_reliable_sender::{CancelHandler, TlsReliableSender};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::error::TryRecvError;
 use types::artemis::{
-    Block, ClientMsg, GENESIS_BLOCK, ProtocolMsg, Replica, Round, Storage, Transaction, UCRVote,
-    View,
+    Block, GENESIS_BLOCK, ProtocolMsg, Replica, Round, Storage, Transaction, UCRVote, View,
 };
 
 /// Config context
@@ -29,33 +28,27 @@ pub struct Context {
     pub pub_key_map: HashMap<Replica, PublicKey>,
     /// My Secret Key
     pub my_secret_key: Arc<Keypair>,
-    /// Whether or not our client supports UCR or not.
-    /// If yes, UCR is enabled, and we send the block on proposing.
-    /// If no, UCR is disabled, and we notify the client on committing.
-    is_client_apollo_enabled: bool,
 
     /// Consensus network (node-to-node).
     pub consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
-    /// Client network (node-to-every-client).
-    pub client_net: TlsReliableSender<ClientId, ClientMsg>,
     /// All peer ids except my own.
     pub broadcast_peers: Vec<Replica>,
-    /// All registered clients.
-    pub all_clients: Vec<ClientId>,
     /// Cancel handlers, keyed by the round observed at send time.
     pub consensus_handlers: HashMap<Round, Vec<CancelHandler>>,
-    pub client_handlers: HashMap<Round, Vec<CancelHandler>>,
 
     /// Rocksdb durable fallback; writes fire on a detached task.
     pub batch_store: RocksStore,
     /// In-memory batch cache shared with the libapollo-mempool pipeline.
     pub batch_cache: Arc<BatchCache<Transaction>>,
-    /// Batches the mempool has announced as ready, waiting for the
-    /// current view leader to propose. Each entry carries the
-    /// `Arc<CachedBatch>` directly so the leader skips a rocksdb read.
+    /// Batches the keyed mempool has announced as ready, waiting for
+    /// the current view leader to propose.
     pub pending_batches: VecDeque<(BatchHash<Transaction>, Arc<CachedBatch<Transaction>>)>,
-    /// Control channel to the mempool.
-    pub tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
+
+    /// Outgoing BCM channel (NewRound / Proposed / Committed / Rollback)
+    /// to the keyed batcher.
+    pub tx_consensus_to_batcher: UnboundedSender<BatcherConsensusMsg<Transaction>>,
+    /// Committed-batch sink for the confirmation router.
+    pub tx_committed_to_router: UnboundedSender<Arc<CachedBatch<Transaction>>>,
 
     /// Storage context. Post-libmempool this is a block index only.
     pub storage: Storage,
@@ -81,16 +74,15 @@ pub struct Context {
     /// A counter to keep track of all the requests
     pub req_ctr: u64,
 
-    /// Per-block payload size used when pushing committed blocks out
-    /// to clients.
+    /// Per-block payload size used when assembling client-side
+    /// notifications (legacy; the new client only consumes tx-hash
+    /// confirmations).
     pub payload: usize,
 
-    /// Block size, carried through from config; used by the throughput
-    /// sampler to convert "committed blocks" into "committed txs".
+    /// Block size, carried through from config.
     pub block_size: usize,
 
-    /// Bench-only throughput sampler state (see apollo Context for the
-    /// convention; same semantics here).
+    /// Bench-only throughput sampler state.
     pub bench_committed_tx_count: u64,
     pub bench_emit_window_secs: u64,
     pub bench_metrics_node: Replica,
@@ -115,17 +107,15 @@ impl Context {
     pub fn new(
         config: &Node,
         consensus_net: TlsReliableSender<Replica, ProtocolMsg>,
-        client_net: TlsReliableSender<ClientId, ClientMsg>,
         batch_store: RocksStore,
         batch_cache: Arc<BatchCache<Transaction>>,
-        tx_consensus_to_mem: UnboundedSender<ConsensusMempoolMsg<Replica, Round, Transaction>>,
-        apollo_enabled: bool,
+        tx_consensus_to_batcher: UnboundedSender<BatcherConsensusMsg<Transaction>>,
+        tx_committed_to_router: UnboundedSender<Arc<CachedBatch<Transaction>>>,
     ) -> Self {
         let genesis_arc = Arc::new(GENESIS_BLOCK);
         let broadcast_peers: Vec<Replica> = (0..config.num_nodes as Replica)
             .filter(|r| *r != config.id)
             .collect();
-        let all_clients: Vec<ClientId> = config.client_net_map.keys().copied().collect();
         let mut c = Context {
             num_nodes: config.num_nodes,
             num_faults: config.num_faults,
@@ -145,15 +135,13 @@ impl Context {
             },
             pub_key_map: HashMap::default(),
             consensus_net,
-            client_net,
             broadcast_peers,
-            all_clients,
             consensus_handlers: HashMap::default(),
-            client_handlers: HashMap::default(),
             batch_store,
             batch_cache,
             pending_batches: VecDeque::new(),
-            tx_consensus_to_mem,
+            tx_consensus_to_batcher,
+            tx_committed_to_router,
             storage: Storage::new(),
             view_leader: 0,
             round_leader: (config.num_faults - 1) as Replica,
@@ -163,7 +151,6 @@ impl Context {
             round: 1,
             last_seen_block: genesis_arc.clone(),
             last_voted_block: genesis_arc,
-            is_client_apollo_enabled: apollo_enabled,
             req_ctr: 0,
             payload: config.payload * config.block_size,
             block_size: config.block_size,
@@ -199,9 +186,7 @@ impl Context {
             };
             c.pub_key_map.insert(*id, pk);
         }
-        // Initialize storage with the genesis block
         c.storage.add_delivered_block(c.last_seen_block.clone());
-        // Initialize the leaders
         for i in 0..config.num_faults {
             c.last_f_leaders.insert(i as Replica, ());
         }
@@ -238,6 +223,21 @@ impl Context {
         (self.eligible_leaders[idx], idx)
     }
 
+    /// Notify the keyed batcher that this node has advanced past
+    /// `last_seen_block` so its `current_round` is up to date. The
+    /// view leader is constant in the current artemis design; if a
+    /// view change is added later, this is the place to surface a new
+    /// `leader` to the batcher.
+    pub(crate) fn announce_height_to_batcher(&self) {
+        let next_height = self.last_seen_block.blk.header.height + 1;
+        let _ = self
+            .tx_consensus_to_batcher
+            .send(BatcherConsensusMsg::NewRound {
+                leader: self.view_leader,
+                round: next_height,
+            });
+    }
+
     #[inline]
     pub const fn num_nodes(&self) -> usize {
         self.num_nodes
@@ -254,11 +254,6 @@ impl Context {
     }
 
     #[inline]
-    pub const fn is_client_apollo_enabled(&self) -> bool {
-        self.is_client_apollo_enabled
-    }
-
-    #[inline]
     pub const fn round(&self) -> Round {
         self.round
     }
@@ -271,14 +266,6 @@ impl Context {
             .push(h);
     }
 
-    #[inline]
-    pub(crate) fn remember_client(&mut self, h: CancelHandler) {
-        self.client_handlers.entry(self.round).or_default().push(h);
-    }
-
-    /// See the matching comment on `synchs` / `apollo` `gc_handlers`
-    /// -- retain handlers that are still empty (message in flight),
-    /// drop those that have resolved. Called on `update_round`.
     pub(crate) fn gc_handlers(&mut self) {
         let gc = |map: &mut HashMap<Round, Vec<CancelHandler>>| {
             map.retain(|_, handlers| {
@@ -287,7 +274,6 @@ impl Context {
             });
         };
         gc(&mut self.consensus_handlers);
-        gc(&mut self.client_handlers);
     }
 
     #[inline]
@@ -296,7 +282,6 @@ impl Context {
     }
 
     /// Install an incoming batch in the cache; enqueue rocksdb write.
-    /// See `synchs::Context::persist_batch` for the rationale.
     pub async fn persist_batch(
         &mut self,
         batch_hash: BatchHash<Transaction>,
@@ -318,24 +303,15 @@ impl Context {
         }
         let key = batch_hash.as_ref().to_vec();
         match self.batch_store.read(key).await {
-            Ok(Some(bytes)) => {
-                match bincode::deserialize::<CachedBatch<Transaction>>(&bytes) {
-                    Ok(b) => {
-                        let arc = Arc::new(b);
-                        self.batch_cache.insert(batch_hash.clone(), Arc::clone(&arc));
-                        Some(arc)
-                    }
-                    Err(_) => None,
+            Ok(Some(bytes)) => match bincode::deserialize::<CachedBatch<Transaction>>(&bytes) {
+                Ok(b) => {
+                    let arc = Arc::new(b);
+                    self.batch_cache.insert(batch_hash.clone(), Arc::clone(&arc));
+                    Some(arc)
                 }
-            }
+                Err(_) => None,
+            },
             _ => None,
         }
-    }
-
-    /// Hydrate per-tx hashes from a batch. `CachedBatch::tx_hashes` is
-    /// `OnceLock`-cached: free on the leader (intake pre-filled),
-    /// one-time SHA256 pass on followers.
-    pub fn hydrate_tx_hashes(batch: &CachedBatch<Transaction>) -> Vec<Hash<Transaction>> {
-        batch.tx_hashes().to_vec()
     }
 }

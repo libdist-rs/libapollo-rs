@@ -1,23 +1,20 @@
 use clap::{load_yaml, App};
-use config::{ClientId, Node};
+use config::Node;
 use fnv::FnvHashMap;
-use libmempool::{BatchHash, CachedBatch, ConsensusMempoolMsg, Mempool};
+use libmempool::{BatchHash, CachedBatch, KeyedMempool};
 use libstorage::rocksdb::Storage as RocksStore;
 use net_common::{CertSource, TlsOptions};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tls_receiver::TlsReceiver;
 use tls_reliable_sender::TlsReliableSender;
 use tokio::sync::mpsc::unbounded_channel;
-use types::artemis::{ClientMsg, ProtocolMsg, Replica, Round, Transaction};
-use types::CountSealer;
+use types::artemis::{ProtocolMsg, Replica, Transaction};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Raise the per-process FD soft limit before opening any sockets.
-    // Scalability sweep at n=61 needs >7k FDs per process; macOS default
-    // soft limit is 256.
     match fdlimit::raise_fd_limit() {
         Ok(fdlimit::Outcome::LimitRaised { from, to }) => {
             println!("Raised FD limit: {} -> {}", from, to);
@@ -71,7 +68,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.update_config(util::io::file_to_ips(f.to_string()));
     }
     let config = config;
-    let is_client_apollo_enabled = m.is_present("special_client");
 
     simple_logger::SimpleLogger::new().init().unwrap();
     let x = m.occurrences_of("debug");
@@ -82,7 +78,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     log::info!("Successfully decoded the config file");
-    log::info!("Using special artemis client: {}", is_client_apollo_enabled);
 
     let rocksdb_path = m
         .value_of("store")
@@ -117,7 +112,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .my_ip()
             .parse()
             .expect("failed to parse consensus listen addr");
-        let consensus_recv = TlsReceiver::<ProtocolMsg>::spawn_with_options(consensus_listen, tls());
+        let consensus_recv =
+            TlsReceiver::<ProtocolMsg>::spawn_with_options(consensus_listen, tls());
 
         let mut peer_map: FnvHashMap<Replica, SocketAddr> = FnvHashMap::default();
         for (&id, addr) in &config.net_map {
@@ -130,66 +126,50 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap_or_else(|_| panic!("invalid peer addr for {}: {}", id, addr)),
             );
         }
-        let consensus_net = TlsReliableSender::<Replica, ProtocolMsg>::with_peers_and_options(
-            peer_map,
-            tls(),
-        )
-        .expect("consensus sender setup");
-
-        let mut client_map: FnvHashMap<ClientId, SocketAddr> = FnvHashMap::default();
-        for (&id, addr) in &config.client_net_map {
-            client_map.insert(
-                id,
-                addr.parse()
-                    .unwrap_or_else(|_| panic!("invalid client addr for {}: {}", id, addr)),
-            );
-        }
-        let client_net = TlsReliableSender::<ClientId, ClientMsg>::with_peers_and_options(
-            client_map,
-            tls(),
-        )
-        .expect("client sender setup");
-
-        let (tx_consensus_to_mem, rx_consensus_to_mem) =
-            unbounded_channel::<ConsensusMempoolMsg<Replica, Round, Transaction>>();
-        let (tx_mem_to_consensus, rx_mem_to_consensus) = unbounded_channel::<(
-            BatchHash<Transaction>,
-            Arc<CachedBatch<Transaction>>,
-        )>();
+        let consensus_net =
+            TlsReliableSender::<Replica, ProtocolMsg>::with_peers_and_options(peer_map, tls())
+                .expect("consensus sender setup");
 
         let client_intake: SocketAddr = config
             .client_ip()
             .parse()
             .expect("failed to parse mempool client-facing addr");
 
-        let mempool = Mempool::<Transaction>::spawn::<
-            CountSealer,
-            RocksStore,
-            Replica,
-            Round,
-        >(
-            CountSealer::new(config.block_size),
-            batch_store.clone(),
+        let (tx_mem_to_consensus, rx_mem_to_consensus) = unbounded_channel::<(
+            BatchHash<Transaction>,
+            Arc<CachedBatch<Transaction>>,
+        )>();
+
+        // Initial view leader is replica 0 in the current artemis design.
+        let initial_leader: Replica = 0;
+        let batch_timeout = Duration::from_millis(50);
+
+        let keyed = KeyedMempool::<Transaction>::spawn::<RocksStore>(
+            config.id,
+            initial_leader,
             client_intake,
+            config.block_size,
+            batch_timeout,
+            batch_store.clone(),
             tx_mem_to_consensus,
-            rx_consensus_to_mem,
             None,
         );
-        let batch_cache = mempool.cache;
+        let batch_cache = Arc::clone(&keyed.cache);
+        let tx_consensus_to_batcher = keyed.tx_consensus_to_batcher.clone();
+        let tx_committed_to_router = keyed.tx_committed_to_router.clone();
 
         let sleep_time = unsafe { config::SLEEP_TIME };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_time)).await;
 
         artemis::node::reactor(
             &config,
-            is_client_apollo_enabled,
             consensus_net,
             consensus_recv,
-            client_net,
             batch_store,
             batch_cache,
             rx_mem_to_consensus,
-            tx_consensus_to_mem,
+            tx_consensus_to_batcher,
+            tx_committed_to_router,
         )
         .await;
     });

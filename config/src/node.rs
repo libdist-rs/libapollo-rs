@@ -16,7 +16,8 @@ use toml::from_str;
 
 /// A short type alias used only in this crate -- clients are a
 /// different replica family from consensus replicas, so we distinguish
-/// them by using a dedicated id type.
+/// them by using a dedicated id type. Re-exported by libapollo-mempool
+/// as `libmempool::ClientId` for the keyed Txpool.
 pub type ClientId = u16;
 
 /// Default emit window (seconds) for the server-side throughput sampler.

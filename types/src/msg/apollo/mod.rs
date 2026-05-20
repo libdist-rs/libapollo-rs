@@ -1,9 +1,6 @@
 mod proto;
 pub use proto::*;
 
-mod client;
-pub use client::*;
-
 mod propose;
 pub use propose::*;
 

@@ -1,12 +1,13 @@
-use types::artemis::{ClientMsg, ProtocolMsg, Replica};
+use types::artemis::{ProtocolMsg, Replica};
 
 use super::context::Context;
 use std::sync::Arc;
 
-/// Communication logic: send/multicast/multicast_client helpers that
-/// serialize and hand off to the underlying libnet-rs senders.
+/// Communication helpers: send / multicast on the consensus network.
+/// Per-tx client confirmations are routed by the mempool's
+/// `ConfirmationRouter`, so there is no `multicast_client` here any
+/// more.
 impl Context {
-    /// Send a `ProtocolMsg` to a specific peer.
     pub(crate) async fn send(&mut self, to: Replica, msg: Arc<ProtocolMsg>) {
         if to == self.myid() {
             return;
@@ -18,7 +19,6 @@ impl Context {
         }
     }
 
-    /// Multicast (Sendall) to every peer but myself.
     pub(crate) async fn multicast(&mut self, msg: Arc<ProtocolMsg>) {
         let bytes = Self::serialize_proto(msg.as_ref());
         let results = self
@@ -29,21 +29,6 @@ impl Context {
             match r {
                 Ok(h) => self.remember_consensus(h),
                 Err(e) => log::warn!("consensus broadcast leg failed: {:?}", e),
-            }
-        }
-    }
-
-    /// Multicast a `ClientMsg` to every registered client.
-    pub(crate) async fn multicast_client(&mut self, msg: Arc<ClientMsg>) {
-        if self.all_clients.is_empty() {
-            return;
-        }
-        let bytes = bytes::Bytes::from(bincode::serialize(msg.as_ref()).expect("ClientMsg serialize"));
-        let results = self.client_net.broadcast(&self.all_clients, bytes).await;
-        for r in results {
-            match r {
-                Ok(h) => self.remember_client(h),
-                Err(e) => log::warn!("client broadcast leg failed: {:?}", e),
             }
         }
     }

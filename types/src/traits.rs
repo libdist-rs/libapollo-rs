@@ -18,6 +18,9 @@ pub trait BlockTrait: Sized + Serialize {
 }
 
 /// Transaction trait, anything that can compute its own hash.
+/// (Nonce/client_id keying lives on libapollo-mempool's `MempoolTx`
+/// trait so the keyed pool's dedup contract is co-located with the
+/// pool itself rather than spread across the types crate.)
 pub trait TxTrait: Sized + Serialize {
     /// A method to get the hash of this transaction.
     fn get_hash(&self) -> Hash<Self>;
