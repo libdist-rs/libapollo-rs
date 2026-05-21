@@ -57,14 +57,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     log::info!("Successfully decoded the config file");
     let metrics: u64 = m.value_of("metrics").unwrap_or("500000")
         .parse().unwrap();
-    // `txs_per_burst` is the new knob; the legacy `--window` flag is
-    // re-interpreted as burst size for backwards-compatible CLI use.
-    let txs_per_burst: usize = m.value_of("txs_per_burst")
-        .or_else(|| m.value_of("window"))
-        .unwrap_or("1000")
-        .parse().unwrap();
     let burst_interval_ms: u64 = m.value_of("burst_interval_ms").unwrap_or("100")
         .parse().unwrap();
+    // `--rate <tx/s>` is the preferred knob (matches the leto/zeus
+    // convention used by the multi-protocol orchestrator). When set,
+    // it converts to a per-burst count of `(rate * burst_interval_ms) / 1000`.
+    // Falls back to `--txs_per_burst` / legacy `--window` when --rate=0
+    // so closed-loop tooling keeps working.
+    let rate: u64 = m.value_of("rate").unwrap_or("0")
+        .parse().unwrap();
+    let txs_per_burst: usize = if rate > 0 {
+        (((rate * burst_interval_ms) / 1000).max(1)) as usize
+    } else {
+        m.value_of("txs_per_burst")
+            .or_else(|| m.value_of("window"))
+            .unwrap_or("1000")
+            .parse().unwrap()
+    };
 
     apollo::client::start(
         &config, metrics, txs_per_burst, burst_interval_ms).await;
