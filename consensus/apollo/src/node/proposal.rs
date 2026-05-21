@@ -111,6 +111,26 @@ pub async fn on_receive_proposal(p: Arc<Propose>, block: Arc<Block>, cx: &mut Co
     cx.prop_chain_by_hash.insert(p.block_hash.clone(), p.clone());
     cx.prop_chain_by_round.insert(p.round, p.clone());
 
+    // Tell the local Txpool that this batch is now InFlight at p.round
+    // so that if THIS node becomes leader for a later round before
+    // BCM::Committed for p.round arrives, it does NOT include the same
+    // (client_id, nonce) txs in a competing batch. Without this, every
+    // leader rotation between propose-of-block-R and commit-of-block-R
+    // produces a duplicate-batch over-count proportional to the
+    // pipeline depth (2× at n=4, f=1).
+    //
+    // Idempotent on the proposer's own loopback (do_propose sends the
+    // same signal before on_receive_proposal); Txpool::admit_proposal
+    // checks `inflight.contains_key((c, n))` and skips.
+    if let Some(batch) = cx.read_batch(&block.body.batch_hash).await {
+        let _ = cx
+            .tx_consensus_to_batcher
+            .send(BatcherConsensusMsg::Proposed {
+                batch,
+                round: p.round,
+            });
+    }
+
     if cx.round() > cx.num_faults() as u64 {
         do_commit(cx).await;
     }
