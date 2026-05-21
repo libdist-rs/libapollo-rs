@@ -8,7 +8,7 @@
 
 use bytes::Bytes;
 use config::Client;
-use consensus::statistics;
+use consensus::{emit_window_latency, LAT_WINDOW_SECS};
 use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use libmempool::ClientMsg;
@@ -48,8 +48,15 @@ pub async fn start(
     let mut nonce: u64 = 1;
 
     let mut time_map: HashMap<Hash<Transaction>, SystemTime> = HashMap::default();
-    let mut latency_map: HashMap<Hash<Transaction>, (SystemTime, SystemTime)> = HashMap::default();
     let mut num_cmds: u128 = 0;
+
+    // Per-window latency samples (ms). Flushed as the median on each
+    // `lat_window` tick, matching leto/zeus's `DP[Latency]: <median>`
+    // per-window emission. The cumulative-mean emission via
+    // `consensus::statistics` was replaced because the orchestrator's
+    // last-seen value should reflect the steady-state window, not a
+    // startup-skewed mean over the run.
+    let mut window_samples: Vec<u128> = Vec::with_capacity(4096);
 
     let burst_size = txs_per_burst.max(1);
     log::info!(
@@ -58,9 +65,15 @@ pub async fn start(
     );
     let start = SystemTime::now();
     let mut burst_timer = tokio::time::interval(Duration::from_millis(burst_interval_ms));
+    let mut lat_window = tokio::time::interval(Duration::from_secs(LAT_WINDOW_SECS));
+    lat_window.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _ = lat_window.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
+            _ = lat_window.tick() => {
+                emit_window_latency(&mut window_samples);
+            },
             _ = burst_timer.tick() => {
                 let mut batch: Vec<Transaction> = Vec::with_capacity(burst_size);
                 let now = SystemTime::now();
@@ -84,14 +97,22 @@ pub async fn start(
                 };
                 if let ClientMsg::Confirmation(h) = msg {
                     if let Some(t0) = time_map.remove(&h) {
-                        latency_map.insert(h, (t0, now));
+                        let lat_ms = now
+                            .duration_since(t0)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        window_samples.push(lat_ms);
                         num_cmds += 1;
                     }
                     while let Some(Ok(ClientMsg::Confirmation(h))) =
                         futures::FutureExt::now_or_never(confirm_recv.next()).flatten()
                     {
                         if let Some(t0) = time_map.remove(&h) {
-                            latency_map.insert(h, (t0, now));
+                            let lat_ms = now
+                                .duration_since(t0)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            window_samples.push(lat_ms);
                             num_cmds += 1;
                         }
                     }
@@ -99,8 +120,13 @@ pub async fn start(
             }
         }
         if num_cmds > metric as u128 {
-            let now = SystemTime::now();
-            statistics(now, start, latency_map);
+            // Flush the trailing partial window so the last
+            // `DP[Latency]` reflects this run's final-window median.
+            // The client does NOT emit `DP[Throughput]`: that signal
+            // is the server's responsibility (see
+            // `consensus::artemis::node::reactor` per-second sampler).
+            emit_window_latency(&mut window_samples);
+            let _ = start; // start kept for legacy callers; unused here
             return;
         }
     }

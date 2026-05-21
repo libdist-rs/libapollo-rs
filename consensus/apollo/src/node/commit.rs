@@ -16,10 +16,6 @@ pub async fn do_commit(cx: &mut Context) {
         hash = b_rc.header.prev.clone();
         newly_committed.push(b_rc);
     }
-    cx.bench_committed_tx_count = cx
-        .bench_committed_tx_count
-        .saturating_add((newly_committed.len() as u64) * cx.block_size as u64);
-
     // Notify the keyed batcher and the confirmation router about each
     // newly-committed block. The batcher advances per-client
     // `high_committed_nonce` and GCs stale Mineable/InFlight; the
@@ -27,7 +23,11 @@ pub async fn do_commit(cx: &mut Context) {
     // `Confirmation(Hash<Tx>)` back to the originating client.
     //
     // We commit in chain order (oldest first) so the batcher sees
-    // monotonically increasing rounds.
+    // monotonically increasing rounds. `bench_committed_tx_count` is
+    // accumulated here from the actual `batch.payload.len()` -- the
+    // mempool's `block_size` is a byte budget, not a tx count, so the
+    // old `newly_committed.len() * block_size` overstated throughput
+    // (typically by ~26x at the default config).
     for block in newly_committed.into_iter().rev() {
         let batch = match cx.read_batch(&block.body.batch_hash).await {
             Some(b) => b,
@@ -39,6 +39,9 @@ pub async fn do_commit(cx: &mut Context) {
                 continue;
             }
         };
+        cx.bench_committed_tx_count = cx
+            .bench_committed_tx_count
+            .saturating_add(batch.payload.len() as u64);
         let _ = cx.tx_consensus_to_batcher.send(BatcherConsensusMsg::Committed {
             batch: Arc::clone(&batch),
             round: block.header.height,

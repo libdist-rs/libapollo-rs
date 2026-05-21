@@ -2,14 +2,58 @@ use fnv::FnvHashMap as HashMap;
 use libcrypto::hash::Hash;
 use std::time::SystemTime;
 
-/// Summarize a run: emit `DP[Throughput]` and `DP[Latency]` lines from the
-/// client's per-tx send/commit timestamps. Generic over `Tx` so callers get
-/// a type-safe `Hash<Tx>` key; `Tx` is otherwise phantom here.
-///
-/// Convention note: For the Apollo and Artemis protocols throughput is now
-/// emitted on the server side (see `consensus::{apollo,artemis}::reactor`)
-/// so this function is only used by the legacy synchs / optsync clients,
-/// which still drive throughput off client-observed commit counts.
+/// Per-window emission cadence (seconds) for `DP[Latency]`. Matches the
+/// leto/zeus convention so cross-codebase orchestrators see the same
+/// signal shape: per-window median latency on stderr, throughput once
+/// at end-of-run. 1s gives finer-grained steady-state visibility.
+pub const LAT_WINDOW_SECS: u64 = 1;
+
+/// Emit the median of `samples` (latency in ms) as
+/// `DP[Latency]: <median>` on stderr, then clear `samples`. No-op when
+/// empty. Mirrors leto/zeus's per-window median-latency convention:
+/// the orchestrator's last-seen value is the steady-state window, and
+/// medians are robust to startup/cooldown skew that would distort a
+/// cumulative mean.
+pub fn emit_window_latency(samples: &mut Vec<u128>) {
+    if samples.is_empty() {
+        return;
+    }
+    samples.sort_unstable();
+    let mid = samples.len() / 2;
+    let median = if samples.len() % 2 == 0 {
+        (samples[mid - 1] + samples[mid]) / 2
+    } else {
+        samples[mid]
+    };
+    eprintln!("DP[Latency]: {}", median);
+    samples.clear();
+}
+
+/// End-of-run throughput emission: cumulative `confirmed / elapsed`.
+/// Uses `eprintln!` so the line lands on stderr unconditionally, no
+/// log-filter dependency. Matches the leto/zeus shape (`DP[Throughput]`
+/// once at end, `DP[Latency]` per window during the run).
+pub fn emit_run_throughput(now: SystemTime, start: SystemTime, confirmed: u64) {
+    let elapsed = now
+        .duration_since(start)
+        .expect("time differencing errors")
+        .as_secs_f64();
+    let tps = if elapsed > 0.0 {
+        confirmed as f64 / elapsed
+    } else {
+        0.0
+    };
+    eprintln!("DP[Start]: {:?}", start);
+    eprintln!("DP[End]: {:?}", now);
+    eprintln!("DP[Throughput]: {}", tps);
+}
+
+/// Legacy end-of-run summary: emits `DP[Throughput]` and a cumulative
+/// mean `DP[Latency]` via `log::info!`. Retained for the synchs /
+/// optsync clients which still drive throughput off client-observed
+/// commit counts and do not yet follow the per-window leto/zeus
+/// convention. Apollo and Artemis instead use
+/// `emit_window_latency` + `emit_run_throughput`.
 pub fn statistics<Tx>(
     now: SystemTime,
     start: SystemTime,

@@ -205,6 +205,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .expect("mempool_base_port value not specified")
         .parse::<u16>()
         .expect("failed to parse mempool_base_port into an integer");
+    let num_clients: u16 = m.value_of("num_clients")
+        .unwrap_or("1")
+        .parse::<u16>()
+        .expect("failed to parse num_clients into an integer");
+    if num_clients == 0 {
+        panic!("num_clients must be >= 1");
+    }
 
     // Parse `--node_ips` / `--client_ips` comma-separated lists into
     // IP SANs for the per-node / per-client certs. Empty list leaves
@@ -219,11 +226,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let node_ip_sans: Vec<String> = parse_ip_list(m.value_of("node_ips"));
     let client_ip_sans: Vec<String> = parse_ip_list(m.value_of("client_ips"));
 
-    let mut client = Client::new();
-    client.block_size = blocksize;
-    client.crypto_alg = t.clone();
-    client.num_nodes = num_nodes;
-    client.num_faults = num_faults;
+    // One `Client` config per minted identity. Each shares the same view
+    // of the cluster (`net_map`, `server_pk`, etc.) and differs only in
+    // `my_id` / `my_listen_addr` / cert pair, which are filled in below.
+    let mut clients: Vec<Client> = (0..num_clients)
+        .map(|_| {
+            let mut c = Client::new();
+            c.block_size = blocksize;
+            c.crypto_alg = t.clone();
+            c.num_nodes = num_nodes;
+            c.num_faults = num_faults;
+            c
+        })
+        .collect();
 
     let mut node:Vec<Node> = Vec::with_capacity(num_nodes);
 
@@ -273,12 +288,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         mempool_ip.insert(i as Replica,
         format!("{}:{}", "127.0.0.1", mempool_base_port+(i as u16))
         );
-        // The client submits transactions to each node's mempool
-        // (plain TCP), so net_map on the client side points at
+        // Every client submits transactions to each node's mempool
+        // (plain TCP), so net_map on each client side points at
         // `client_base_port+i`, not the mempool peer port.
-        client.net_map.insert(i as Replica,
-        format!("127.0.0.1:{}", client_base_port+(i as u16))
-        );
+        for c in clients.iter_mut() {
+            c.net_map.insert(i as Replica,
+                format!("127.0.0.1:{}", client_base_port+(i as u16))
+            );
+        }
 
         let (new_cert, new_pkey) = get_signed_cert(&cert, &privkey, &node_ip_sans)?;
 
@@ -298,26 +315,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         node[i].my_cert_key_path = write_cert_file(target_path, &format!("node-{}.key.pem", i), &node_key_pem)?;
     }
 
-    // Generate one client identity for the stress-test topology. Its
-    // address is registered in every node's `client_net_map` so nodes
-    // can push committed `ClientMsg` back.
-    let client_id: u16 = 0;
-    let client_addr = format!("127.0.0.1:{}", client_listen_port);
-    let (client_cert, client_pkey) = get_signed_cert(&cert, &privkey, &client_ip_sans)?;
-    let mut client_chain_pem = client_cert.to_pem()?;
-    client_chain_pem.extend_from_slice(&root_cert_pem);
-    let client_key_pem = client_pkey.private_key_to_pem_pkcs8()?;
-    let client_cert_path = write_cert_file(target_path, "client-0.chain.pem", &client_chain_pem)?;
-    let client_key_path = write_cert_file(target_path, "client-0.key.pem", &client_key_pem)?;
-
+    // Mint `num_clients` client identities. Each gets a distinct
+    // `client_id` (= j), a distinct listen address (client_listen_port+j),
+    // and its own TLS cert pair. Every node's `client_net_map` is
+    // populated with all of them so the confirmation router can push
+    // `ClientMsg` back to the originating client per tx.
     let mut client_net_map: HashMap<u16, String> = HashMap::default();
-    client_net_map.insert(client_id, client_addr.clone());
+    for j in 0..num_clients {
+        let client_id: u16 = j;
+        let client_addr = format!("127.0.0.1:{}", client_listen_port + j);
+        let (client_cert, client_pkey) =
+            get_signed_cert(&cert, &privkey, &client_ip_sans)?;
+        let mut client_chain_pem = client_cert.to_pem()?;
+        client_chain_pem.extend_from_slice(&root_cert_pem);
+        let client_key_pem = client_pkey.private_key_to_pem_pkcs8()?;
+        let client_cert_path = write_cert_file(
+            target_path,
+            &format!("client-{}.chain.pem", j),
+            &client_chain_pem,
+        )?;
+        let client_key_path = write_cert_file(
+            target_path,
+            &format!("client-{}.key.pem", j),
+            &client_key_pem,
+        )?;
 
-    client.my_id = client_id;
-    client.my_listen_addr = client_addr;
-    client.my_cert_path = client_cert_path;
-    client.my_cert_key_path = client_key_path;
-    client.root_cert_path = root_cert_path;
+        client_net_map.insert(client_id, client_addr.clone());
+
+        let c = &mut clients[j as usize];
+        c.my_id = client_id;
+        c.my_listen_addr = client_addr;
+        c.my_cert_path = client_cert_path;
+        c.my_cert_key_path = client_key_path;
+        c.root_cert_path = root_cert_path.clone();
+    }
 
     for i in 0..num_nodes {
         node[i].pk_map = pk.clone();
@@ -326,7 +357,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         node[i].client_net_map = client_net_map.clone();
     }
 
-    client.server_pk = pk;
+    for c in clients.iter_mut() {
+        c.server_pk = pk.clone();
+    }
 
     // Write all the files
     for i in 0..num_nodes {
@@ -353,28 +386,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             .expect("failed to validate node config");
     }
 
-    // Write the client file
+    // Write one config file per client identity. Also write a
+    // `client.{ext}` copy of client 0 so existing single-client tooling
+    // (stress-test/src/main.rs, scripts/fabfile.py) keeps working
+    // without changes when --num_clients=1.
+    for (j, c) in clients.iter().enumerate() {
+        let stem = format!("client-{}", j);
+        match out {
+            "json"   => write_json(format!("{}/{}.json",   target, stem), c),
+            "binary" => write_bin (format!("{}/{}.dat",    target, stem), c),
+            "toml"   => write_toml(format!("{}/{}.toml",   target, stem), c),
+            "yaml"   => write_yaml(format!("{}/{}.yml",    target, stem), c),
+            _ => (),
+        }
+        c.validate()
+            .expect("failed to validate the client config");
+    }
+
+    // Backward-compat alias for the canonical "the" client config.
+    let client0 = &clients[0];
     match out {
-        "json" => {
-            let filename = format!("{}/client.json",target);
-            write_json(filename, &client);
-        },
-        "binary" => {
-            let filename = format!("{}/client.dat",target);
-            write_bin(filename, &client);
-        },
-        "toml" => {
-            let filename = format!("{}/client.toml",target);
-            write_toml(filename, &client);
-        },
-        "yaml" => {
-            let filename = format!("{}/client.yml",target);
-            write_yaml(filename, &client);
-        },
+        "json"   => write_json(format!("{}/client.json", target), client0),
+        "binary" => write_bin (format!("{}/client.dat",  target), client0),
+        "toml"   => write_toml(format!("{}/client.toml", target), client0),
+        "yaml"   => write_yaml(format!("{}/client.yml",  target), client0),
         _ => (),
     }
-    client.validate()
-        .expect("failed to validate the client config");
 
     Ok(())
 }

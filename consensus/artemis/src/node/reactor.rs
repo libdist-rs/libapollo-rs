@@ -59,6 +59,13 @@ pub async fn reactor(
     // at height 1.
     cx.announce_height_to_batcher();
 
+    // Bench-only throughput sampler. `cx.bench_committed_tx_count`
+    // counts actual `batch.payload.len()` per committed block (see
+    // commit.rs), so the per-window tps reported here reflects the
+    // true committed-tx rate from this node's view. The stress-test
+    // orchestrator ignores this line (it scrapes the client process's
+    // stdio); it is preserved for direct node-log inspection and for
+    // `bench-artemis-metrics.sh`-style harnesses.
     let window_secs = cx.bench_emit_window_secs;
     let metrics_node = cx.bench_metrics_node;
     let mut throughput_tick =

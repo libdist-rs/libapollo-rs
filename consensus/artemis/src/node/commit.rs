@@ -28,11 +28,12 @@ pub async fn do_commit(cx: &mut Context) {
             Hash::<Block>::try_from(b.blk.header.prev.as_ref()).expect("hash is exactly 32 bytes");
         newly_committed.push(b);
     }
-    cx.bench_committed_tx_count = cx
-        .bench_committed_tx_count
-        .saturating_add((newly_committed.len() as u64) * cx.block_size as u64);
-
     // Oldest-first so the batcher sees monotonically increasing rounds.
+    // `bench_committed_tx_count` accumulates the actual
+    // `batch.payload.len()` per committed block. `cx.block_size` is the
+    // mempool's byte budget, not a tx count, so the prior
+    // `newly_committed.len() * block_size` formulation overstated
+    // throughput (typically ~26x at the default config).
     for block in newly_committed.into_iter().rev() {
         let batch = match cx.read_batch(&block.blk.body.batch_hash).await {
             Some(b) => b,
@@ -44,6 +45,9 @@ pub async fn do_commit(cx: &mut Context) {
                 continue;
             }
         };
+        cx.bench_committed_tx_count = cx
+            .bench_committed_tx_count
+            .saturating_add(batch.payload.len() as u64);
         let _ = cx
             .tx_consensus_to_batcher
             .send(BatcherConsensusMsg::Committed {

@@ -3,12 +3,20 @@
 //
 // For each protocol, the harness:
 //   1. Shells out to `genconfig` to produce a fresh Node/Client config set
+//      (with `--num_clients C`, so each client j gets its own
+//      `client-{j}.json` / listen port / cert pair).
 //   2. Writes matching ip / cli_ip files for localhost loopback
 //   3. Spawns N node binaries as child processes
-//   4. Spawns one client binary, which drives load until `-m` transactions commit
-//   5. Parses `DP[Throughput]` / `DP[Latency]` lines printed by
-//      `consensus::statistics` on the client's stderr (simple_logger at INFO)
-//   6. Kills nodes, reports result, moves on
+//   4. Spawns C client binaries in parallel, each driving its own load
+//      of `-m total_txs` until that many confirmations arrive
+//   5. Parses `DP[Throughput]` / `DP[Latency]` per-client from each
+//      client's stdio (simple_logger at INFO, printed by
+//      `consensus::statistics`). The server's old per-window
+//      `DP[Throughput]` emission has been removed; the canonical
+//      number now comes solely from the clients.
+//   6. Aggregates: throughput = sum across clients; latency = mean
+//      across clients (each client confirms the same `-m total_txs`).
+//   7. Kills nodes, reports result, moves on
 //
 // The output format mirrors libnet-rs's stress-test so the two baselines
 // can sit side-by-side in README / CV material. The canonical run is
@@ -77,6 +85,7 @@ struct BenchConfig {
     protocol: Protocol,
     num_nodes: usize,
     num_faults: usize,
+    num_clients: u16,
     block_size: usize,
     payload: usize,
     total_txs: u64,
@@ -84,8 +93,10 @@ struct BenchConfig {
 }
 
 struct BenchResult {
-    throughput: f64, // tx / sec
-    latency_ms: f64, // avg ms per tx
+    throughput: f64, // aggregate tx / sec
+    throughput_src: &'static str, // "server-median" or "client-sum"
+    latency_ms: f64, // mean ms per tx across clients
+    per_client: Vec<(Option<f64>, f64)>, // (throughput, latency_ms) per client; throughput is None for apollo/artemis
     wall_elapsed: Duration,
 }
 
@@ -106,15 +117,16 @@ impl Harness {
         })
     }
 
-    // Allocate a non-overlapping port block per run: 200 ports each,
+    // Allocate a non-overlapping port block per run: 300 ports each,
     // starting high enough that we don't collide with typical dev
     // services. Layout inside a run's block:
-    //   base..base+n          node-to-node consensus (TLS)
-    //   cli_base..cli_base+n  nodes' client-facing TxReceiver (TCP,
-    //                         mempool-spawned)
-    //   mempool_base..+n      nodes' peer-to-peer mempool sync (TCP)
-    //   client_listen         the single stress client's listener for
-    //                         node-pushed `ClientMsg` (TLS)
+    //   base..base+n             node-to-node consensus (TLS)
+    //   cli_base..cli_base+n     nodes' client-facing TxReceiver (TCP,
+    //                            mempool-spawned)
+    //   mempool_base..+n         nodes' peer-to-peer mempool sync (TCP)
+    //   client_listen..+C        per-client listener for node-pushed
+    //                            `ClientMsg` (TCP); client j binds
+    //                            client_listen + j (cap C ≤ 25)
     fn alloc_ports(&mut self) -> (u16, u16, u16, u16) {
         let base = 21000 + self.run_idx * 300;
         let cli_base = base + 100;
@@ -127,9 +139,10 @@ impl Harness {
     async fn run(&mut self, cfg: &BenchConfig) -> Result<BenchResult, BoxErr> {
         let (base_port, cli_base_port, mempool_base_port, client_listen_port) = self.alloc_ports();
         let run_dir = self.runs_dir.join(format!(
-            "{}-n{}-b{}-p{}-{}",
+            "{}-n{}-c{}-b{}-p{}-{}",
             cfg.protocol.short(),
             cfg.num_nodes,
+            cfg.num_clients,
             cfg.block_size,
             cfg.payload,
             base_port
@@ -151,7 +164,7 @@ impl Harness {
         sleep(Duration::from_secs(bootstrap)).await;
 
         let started = Instant::now();
-        let client_out = spawn_client_and_parse(&self.repo_root, &run_dir, cfg).await;
+        let client_out = spawn_clients_and_aggregate(&self.repo_root, &run_dir, cfg).await;
         let wall_elapsed = started.elapsed();
 
         for mut n in nodes {
@@ -160,13 +173,56 @@ impl Harness {
         // Give TCP listeners a moment to release their ports before the next run.
         sleep(Duration::from_millis(500)).await;
 
-        let (throughput, latency_ms) = client_out?;
+        let per_client = client_out?;
+
+        // Throughput source: apollo/artemis clients no longer emit
+        // `DP[Throughput]`; the per-second server emission in
+        // `node-0.log` is canonical. Synchs/Optsync clients still emit
+        // it, so per-client throughput is Some(_) there and we sum.
+        let server_med = parse_server_throughput_median(&run_dir.join("node-0.log"));
+        let (throughput, throughput_src) = if let Some(m) = server_med {
+            (m, "server-median")
+        } else {
+            let sum: f64 = per_client.iter().filter_map(|(t, _)| *t).sum();
+            (sum, "client-sum")
+        };
+
+        let latency_ms: f64 = if per_client.is_empty() {
+            0.0
+        } else {
+            per_client.iter().map(|(_, l)| *l).sum::<f64>() / per_client.len() as f64
+        };
         Ok(BenchResult {
             throughput,
+            throughput_src,
             latency_ms,
+            per_client,
             wall_elapsed,
         })
     }
+}
+
+/// Read `node-0.log`, parse every `DP[Throughput]: <f>` line emitted
+/// by the apollo/artemis reactor's per-second sampler, return their
+/// median. `None` if the file is missing or has no such lines (e.g.
+/// run shorter than one window, or synchs/optsync nodes which do not
+/// emit this line).
+fn parse_server_throughput_median(node0_log: &Path) -> Option<f64> {
+    let text = fs::read_to_string(node0_log).ok()?;
+    let mut vals: Vec<f64> = text
+        .lines()
+        .filter_map(|l| extract_after(l, "DP[Throughput]: "))
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = vals.len() / 2;
+    Some(if vals.len() % 2 == 0 {
+        (vals[mid - 1] + vals[mid]) / 2.0
+    } else {
+        vals[mid]
+    })
 }
 
 async fn genconfig(
@@ -196,6 +252,8 @@ async fn genconfig(
         .arg(mempool_base_port.to_string())
         .arg("--client_listen_port")
         .arg(client_listen_port.to_string())
+        .arg("--num_clients")
+        .arg(cfg.num_clients.to_string())
         .arg("--payload")
         .arg(cfg.payload.to_string())
         .arg("--target")
@@ -261,16 +319,60 @@ async fn spawn_node(
     Ok(child)
 }
 
-async fn spawn_client_and_parse(
+/// Spawn `cfg.num_clients` client processes in parallel, parse each
+/// one's `DP[Throughput]` / `DP[Latency]` line, and return the per-client
+/// pairs. Each client uses its own `client-{j}.json` (minted by
+/// genconfig with `--num_clients`) so listen ports, ids, and certs don't
+/// collide.
+async fn spawn_clients_and_aggregate(
     repo_root: &Path,
     run_dir: &Path,
     cfg: &BenchConfig,
-) -> Result<(f64, f64), BoxErr> {
+) -> Result<Vec<(Option<f64>, f64)>, BoxErr> {
+    let mut tasks = Vec::with_capacity(cfg.num_clients as usize);
+    for j in 0..cfg.num_clients {
+        let repo_root = repo_root.to_path_buf();
+        let run_dir = run_dir.to_path_buf();
+        let cfg = cfg.clone();
+        tasks.push(tokio::spawn(async move {
+            spawn_one_client_and_parse(&repo_root, &run_dir, &cfg, j).await
+        }));
+    }
+
+    let mut out: Vec<(Option<f64>, f64)> = Vec::with_capacity(tasks.len());
+    let mut first_err: Option<BoxErr> = None;
+    for (j, t) in tasks.into_iter().enumerate() {
+        match t.await {
+            Ok(Ok(pair)) => out.push(pair),
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(format!("client {}: {}", j, e).into());
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(format!("client {} task: {}", j, e).into());
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+async fn spawn_one_client_and_parse(
+    repo_root: &Path,
+    run_dir: &Path,
+    cfg: &BenchConfig,
+    j: u16,
+) -> Result<(Option<f64>, f64), BoxErr> {
     let bin = repo_root.join(format!("target/release/client-{}", cfg.protocol.short()));
-    let config_file = run_dir.join("client.json");
+    let config_file = run_dir.join(format!("client-{}.json", j));
     let cli_ip_file = run_dir.join("cli_ip_file");
 
-    let log_path = run_dir.join("client.log");
+    let log_path = run_dir.join(format!("client-{}.log", j));
     let mut child = Command::new(&bin)
         .arg("-c")
         .arg(&config_file)
@@ -295,18 +397,27 @@ async fn spawn_client_and_parse(
     let mut stderr_lines = BufReader::new(stderr).lines();
     let mut stdout_lines = BufReader::new(stdout).lines();
 
-    // Tee everything the client prints into a log file so post-mortems are possible.
+    // Tee everything the client prints into a per-client log file so
+    // post-mortems are possible.
     let mut log = std::fs::File::create(&log_path)?;
 
     let parse_window = Duration::from_secs(600);
     let mut throughput: Option<f64> = None;
     let mut latency: Option<f64> = None;
 
+    // Read both streams until EOF, taking the LAST-seen value for each
+    // DP line. Apollo/Artemis emit `DP[Latency]` per window (leto/zeus
+    // convention) plus a final partial-window flush right before
+    // `DP[Throughput]`; the last value seen is the steady-state, not
+    // the first window's median. Synchs/Optsync still emit once at
+    // end-of-run, which this loop also handles correctly.
     let parse = async {
         use std::io::Write;
+        let mut stderr_eof = false;
+        let mut stdout_eof = false;
         loop {
             tokio::select! {
-                line = stderr_lines.next_line() => {
+                line = stderr_lines.next_line(), if !stderr_eof => {
                     match line {
                         Ok(Some(l)) => {
                             let _ = writeln!(log, "[stderr] {}", l);
@@ -316,15 +427,11 @@ async fn spawn_client_and_parse(
                             if let Some(v) = extract_after(&l, "DP[Latency]: ") {
                                 latency = Some(v);
                             }
-                            if throughput.is_some() && latency.is_some() {
-                                break;
-                            }
                         }
-                        Ok(None) => break,
-                        Err(_) => break,
+                        Ok(None) | Err(_) => { stderr_eof = true; }
                     }
                 }
-                line = stdout_lines.next_line() => {
+                line = stdout_lines.next_line(), if !stdout_eof => {
                     match line {
                         Ok(Some(l)) => {
                             let _ = writeln!(log, "[stdout] {}", l);
@@ -334,14 +441,13 @@ async fn spawn_client_and_parse(
                             if let Some(v) = extract_after(&l, "DP[Latency]: ") {
                                 latency = Some(v);
                             }
-                            if throughput.is_some() && latency.is_some() {
-                                break;
-                            }
                         }
-                        Ok(None) => break,
-                        Err(_) => break,
+                        Ok(None) | Err(_) => { stdout_eof = true; }
                     }
                 }
+            }
+            if stderr_eof && stdout_eof {
+                break;
             }
         }
     };
@@ -359,11 +465,18 @@ async fn spawn_client_and_parse(
     // `std::process::exit(0)`. Kill explicitly in case any of that gets stuck.
     let _ = child.kill().await;
 
-    match (throughput, latency) {
-        (Some(t), Some(l)) => Ok((t, l)),
-        (Some(_), None) => Err("saw DP[Throughput] but not DP[Latency]".into()),
-        (None, Some(_)) => Err("saw DP[Latency] but not DP[Throughput]".into()),
-        (None, None) => Err("client produced no DP lines (check run_dir/client.log)".into()),
+    // `DP[Throughput]` is optional on the client side: apollo/artemis
+    // clients no longer emit it (server is the source of truth), but
+    // synchs/optsync clients still do via the legacy `statistics()`
+    // path. `DP[Latency]` is required from every client.
+    match latency {
+        Some(l) => Ok((throughput, l)),
+        None => Err(format!(
+            "client {} produced no DP[Latency] line (check {})",
+            j,
+            log_path.display()
+        )
+        .into()),
     }
 }
 
@@ -385,10 +498,11 @@ fn print_header(cfg: &BenchConfig) {
     println!();
     println!("┌{}", box_line());
     println!(
-        "│ {} (n={}, f={}, blk={}, payload={}B, window={}, txs={})",
+        "│ {} (n={}, f={}, clients={}, blk={}, payload={}B, window={}, txs/cli={})",
         cfg.protocol.label(),
         cfg.num_nodes,
         cfg.num_faults,
+        cfg.num_clients,
         cfg.block_size,
         cfg.payload,
         cfg.window,
@@ -398,10 +512,20 @@ fn print_header(cfg: &BenchConfig) {
 }
 
 fn print_result(r: &BenchResult) {
-    let mb_per_sec = 0.0; // block payload is opaque; leave blank
-    let _ = mb_per_sec;
-    println!("│ Throughput     : {:>12.2} tx/s", r.throughput);
-    println!("│ Avg Latency    : {:>12.2} ms/tx", r.latency_ms);
+    println!("│ Throughput     : {:>12.2} tx/s  ({})", r.throughput, r.throughput_src);
+    println!("│ Avg Latency    : {:>12.2} ms/tx (mean across {} client{})",
+        r.latency_ms,
+        r.per_client.len(),
+        if r.per_client.len() == 1 { "" } else { "s" }
+    );
+    if r.per_client.len() > 1 {
+        for (j, (t, l)) in r.per_client.iter().enumerate() {
+            match t {
+                Some(t) => println!("│   client {:>2}    : {:>12.2} tx/s   {:>8.2} ms/tx", j, t, l),
+                None    => println!("│   client {:>2}    : {:>12}      {:>8.2} ms/tx", j, "—", l),
+            }
+        }
+    }
     println!("│ Wall elapsed   : {:>12.2} s", r.wall_elapsed.as_secs_f64());
     println!("└{}", box_line());
 }
@@ -412,32 +536,34 @@ fn print_failure(err: &(dyn Error + Send + Sync)) {
 }
 
 fn print_summary(results: &[(BenchConfig, Option<BenchResult>)]) {
-    let w = 90;
+    let w = 96;
     let line = "─".repeat(w);
     println!();
     println!("┌{}", line);
     println!(
-        "│ {:<16} {:>4} {:>4} {:>5} {:>7} {:>16} {:>16}",
-        "Protocol", "N", "f", "blk", "txs", "Throughput", "Latency"
+        "│ {:<16} {:>4} {:>4} {:>4} {:>5} {:>7} {:>16} {:>16}",
+        "Protocol", "N", "f", "C", "blk", "txs/c", "Throughput", "Latency"
     );
     println!("├{}", line);
     for (c, r) in results {
         match r {
             Some(r) => println!(
-                "│ {:<16} {:>4} {:>4} {:>5} {:>7} {:>10.2} tx/s {:>11.2} ms",
+                "│ {:<16} {:>4} {:>4} {:>4} {:>5} {:>7} {:>10.2} tx/s {:>11.2} ms",
                 c.protocol.label(),
                 c.num_nodes,
                 c.num_faults,
+                c.num_clients,
                 c.block_size,
                 c.total_txs,
                 r.throughput,
                 r.latency_ms
             ),
             None => println!(
-                "│ {:<16} {:>4} {:>4} {:>5} {:>7} {:>16} {:>16}",
+                "│ {:<16} {:>4} {:>4} {:>4} {:>5} {:>7} {:>16} {:>16}",
                 c.protocol.label(),
                 c.num_nodes,
                 c.num_faults,
+                c.num_clients,
                 c.block_size,
                 c.total_txs,
                 "FAILED",
@@ -465,12 +591,18 @@ fn build_matrix() -> Vec<BenchConfig> {
             Protocol::Optsync,
         ],
     };
+    let num_clients: u16 = std::env::var("NUM_CLIENTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
     for protocol in selected {
         for &(n, f) in &[(3usize, 1usize), (7, 3)] {
             v.push(BenchConfig {
                 protocol,
                 num_nodes: n,
                 num_faults: f,
+                num_clients,
                 block_size: 400,
                 payload: 0,
                 total_txs: 50_000,
@@ -514,6 +646,11 @@ async fn main() -> Result<(), BoxErr> {
     println!(
         "Protocols: Apollo, Artemis, Sync HotStuff, Opt Sync.     Loopback (127.0.0.1), release build."
     );
+    if let Some(c) = matrix.first() {
+        if c.num_clients > 1 {
+            println!("Multi-client: {} parallel clients per run", c.num_clients);
+        }
+    }
 
     let mut results: Vec<(BenchConfig, Option<BenchResult>)> = Vec::new();
     for cfg in matrix {

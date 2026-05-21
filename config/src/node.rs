@@ -24,7 +24,7 @@ pub type ClientId = u16;
 /// Matches the leto-rs convention so a multi-protocol orchestrator can
 /// reuse the same knob across libs.
 fn default_bench_emit_window_secs() -> u64 {
-    5
+    1
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -70,9 +70,15 @@ args:
     - client_listen_port:
         short: L
         long: client_listen_port
-        help: the port the client listens on for node-pushed ClientMsg (single-client stress-test topology)
+        help: base port p such that client j listens on p+j for node-pushed ClientMsg
         takes_value: true
         required: true
+    - num_clients:
+        short: c
+        long: num_clients
+        help: "number of distinct client identities to mint (default 1). Each gets its own client_id, listen port (client_listen_port+j), and TLS cert pair."
+        takes_value: true
+        required: false
     - mempool_base_port:
         short: M
         long: mempool_base_port
